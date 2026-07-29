@@ -8,3 +8,7 @@ flow-chains.json
 chains-*.json
 *.log
 packets/
+
+# 站台是產物，可由 flow-chains.json + manuals/ 重新產生。
+# manuals/ 是人／LLM 撰寫的敘述，要進版控。
+site/

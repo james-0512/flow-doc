@@ -185,6 +185,11 @@ export interface FlowChain {
   entryId: string
   domain: string
   label: string
+  /** 觸發方式：事件名、生命週期鉤子名，或橫切邏輯的階段 */
+  trigger: string
+  /** 承載事件的標籤（UI_EVENT 才有） */
+  tag?: string
+  entryKind: EntryKind | 'CROSSCUT'
   entryLoc: SourceLoc
   root: ChainNode | null
   /** 整條鏈的副作用彙總（去重後） */

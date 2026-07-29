@@ -6,6 +6,7 @@ import { loadConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
 import { defaultPackOptions, packFileName, packFlow, packOverviews } from './pack.js'
+import { buildSite, defaultSiteOptions, slugify } from './site.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
 
@@ -205,6 +206,61 @@ program
       console.log(`\n已打包 ${chains.length} 條流程 + ${result.crosscut.length} 條全域前置到 ${path.resolve(opts.outDir)}`)
       console.log(`  總字元 ${total.toLocaleString()} · 平均 ${chains.length ? Math.round(total / chains.length).toLocaleString() : 0} 字元/流程`)
       console.log(`  目錄：00-overview.md + ${overviews.size - 1} 份業務域清單`)
+    }
+  )
+
+program
+  .command('site')
+  .description('產生 VitePress 靜態站（由分析結果驅動，有手冊敘述的流程一併帶入）')
+  .argument('[chains]', 'trace 產出的 JSON', 'flow-chains.json')
+  .option('-d, --out-dir <dir>', '輸出目錄', 'site')
+  .option('-m, --manuals <dir>', '手冊敘述目錄，檔名為 <entryId 的 slug>.md')
+  .option('--title <text>', '站台標題', defaultSiteOptions.title)
+  .option('--source-base <url>', '原始碼連結前綴，例如 https://github.com/org/repo/blob/main/', '')
+  .option('--limitations <file>', '已知限制清單', 'LIMITATIONS.md')
+  .action(
+    (
+      chainsFile: string,
+      opts: { outDir: string; manuals?: string; title: string; sourceBase: string; limitations: string }
+    ) => {
+      if (!fs.existsSync(chainsFile)) {
+        console.error(`找不到 ${chainsFile}，請先執行 flow-doc trace`)
+        process.exitCode = 1
+        return
+      }
+      const result = JSON.parse(fs.readFileSync(chainsFile, 'utf8')) as TraceResult
+
+      // 手冊敘述以 entryId 的 slug 命名，有幾條放幾條
+      const manuals = new Map<string, string>()
+      if (opts.manuals && fs.existsSync(opts.manuals)) {
+        const byslug = new Map<string, string>()
+        for (const f of fs.readdirSync(opts.manuals)) {
+          if (f.endsWith('.md')) byslug.set(f.replace(/\.md$/, ''), fs.readFileSync(path.join(opts.manuals, f), 'utf8'))
+        }
+        for (const c of [...result.crosscut, ...result.chains]) {
+          const hit = byslug.get(slugify(c.entryId))
+          if (hit) manuals.set(c.entryId, hit)
+        }
+      }
+
+      const limitations = fs.existsSync(opts.limitations) ? fs.readFileSync(opts.limitations, 'utf8') : undefined
+      const pages = buildSite(result, manuals, limitations, {
+        title: opts.title,
+        sourceBaseUrl: opts.sourceBase
+      })
+
+      fs.rmSync(path.join(opts.outDir, 'flows'), { recursive: true, force: true })
+      for (const page of pages) {
+        const dest = path.join(opts.outDir, page.file)
+        fs.mkdirSync(path.dirname(dest), { recursive: true })
+        fs.writeFileSync(dest, page.content, 'utf8')
+      }
+
+      const bytes = pages.reduce((s, p) => s + p.content.length, 0)
+      console.log(`\n已產生 ${pages.length} 個頁面到 ${path.resolve(opts.outDir)}`)
+      console.log(`  流程 ${result.chains.filter(c => c.isFlow).length} 條 · 全域前置 ${result.crosscut.length} 條 · 已撰寫敘述 ${manuals.size} 條`)
+      console.log(`  總計 ${(bytes / 1024).toFixed(0)} KB`)
+      console.log(`\n預覽：pnpm site:dev`)
     }
   )
 

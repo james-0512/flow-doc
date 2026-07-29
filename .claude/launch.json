@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flow-doc-site",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "site", "preview", "--port", "4173"],
+      "port": 4173
+    }
+  ]
+}
