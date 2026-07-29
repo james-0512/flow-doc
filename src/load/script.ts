@@ -1,0 +1,53 @@
+import { ts } from 'ts-morph'
+
+/** 進入頁面時自動觸發的鉤子——這些是「不需要使用者點擊」的流程起點。 */
+const LIFECYCLE_HOOKS = new Set(['onMounted', 'onBeforeMount', 'onActivated', 'onCreated'])
+
+export interface ScriptFacts {
+  /** 本地 import 的元件：識別字 → import specifier */
+  componentImports: Map<string, string>
+  /** 頂層宣告的函式／常數名，用來判斷 template 的 handler 是否指向本檔符號 */
+  declaredNames: Set<string>
+  lifecycle: { hook: string; line: number }[]
+}
+
+/**
+ * 只做語法解析、不建 Program——這一步跑在全 repo 上千個檔案上，
+ * 不能付 Type Checker 的成本。真正的符號解析留到階段二。
+ *
+ * 傳入的 code 必須是行號對齊過的虛擬 TS，回傳的 line 才等於原始 `.vue` 行號。
+ */
+export function extractScriptFacts(fileName: string, code: string): ScriptFacts {
+  const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const componentImports = new Map<string, string>()
+  const declaredNames = new Set<string>()
+  const lifecycle: { hook: string; line: number }[] = []
+
+  const lineOf = (node: ts.Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
+
+  for (const stmt of sf.statements) {
+    if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
+      const spec = stmt.moduleSpecifier.text
+      const name = stmt.importClause?.name?.text
+      if (name) componentImports.set(name, spec)
+      continue
+    }
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declaredNames.add(stmt.name.text)
+    if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name)) declaredNames.add(decl.name.text)
+      }
+    }
+  }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text
+      if (LIFECYCLE_HOOKS.has(name)) lifecycle.push({ hook: name, line: lineOf(node) })
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(sf, visit)
+
+  return { componentImports, declaredNames, lifecycle }
+}

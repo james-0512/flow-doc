@@ -1,0 +1,26 @@
+{
+  "name": "flow-doc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "從 TS/Vue 程式碼庫追蹤業務流程執行路徑，產出流程手冊",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vue/compiler-core": "^3.5.40",
+    "@vue/compiler-sfc": "^3.5.40",
+    "commander": "^15.0.0",
+    "tinyglobby": "^0.2.14",
+    "ts-morph": "^28.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}
