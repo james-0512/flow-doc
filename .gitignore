@@ -5,3 +5,5 @@ dist/
 # 分析輸出（可重新產生，且含目標 repo 的絕對路徑）
 flow-entries.json
 flow-chains.json
+chains-*.json
+*.log

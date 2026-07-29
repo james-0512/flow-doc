@@ -102,3 +102,83 @@ export interface EntryScanResult {
   listeners: ListenerEdge[]
   stats: ScanStats
 }
+
+// ── 階段二：call chain 追蹤 ────────────────────────────────────────────────
+
+export type SinkKind =
+  | 'HTTP_API'
+  | 'STORAGE'
+  | 'ROUTER_NAV'
+  | 'EMIT'
+  | 'SIGNALR'
+  | 'BROADCAST'
+  /** 動到 Pinia store */
+  | 'STORE'
+  /** 呼叫了白名單外、不展開的共用層 */
+  | 'OPAQUE'
+
+export interface SideEffect {
+  kind: SinkKind
+  /** 例如 `POST /api/v1/case/create`、事件名、storage key */
+  detail: string
+  /** 寫入型副作用。D3 的流程判準：整條鏈至少要有一個 mutating 才算一條業務流程 */
+  mutating: boolean
+  loc: SourceLoc
+  /**
+   * 位於 try 保護範圍內，**含上游**——深層拋出的錯誤會被祖先的 try 接住，
+   * 所以這個旗標沿著鏈往下傳遞。階段四的「異常與補償」需要這個訊號。
+   */
+  guarded?: boolean
+  /** 補充說明，例如 swagger 端點的中文 summary */
+  note?: string
+}
+
+export type StopReason = 'MAX_DEPTH' | 'CYCLE' | 'BUDGET' | 'BOUNDARY' | 'UNRESOLVED'
+
+export interface ChainNode {
+  name: string
+  loc: SourceLoc
+  effects: SideEffect[]
+  children: ChainNode[]
+  /**
+   * 呼叫解析出多個候選定義（interface 多實作、多載）時全部列出，**不硬選**。
+   * plan.md §3 的原則：交由 LLM 於生成時說明「依注入／設定決定」。
+   */
+  candidates?: SourceLoc[]
+  stoppedBy?: StopReason
+}
+
+export interface FlowChain {
+  entryId: string
+  domain: string
+  label: string
+  entryLoc: SourceLoc
+  root: ChainNode | null
+  /** 整條鏈的副作用彙總（去重後） */
+  effects: SideEffect[]
+  nodeCount: number
+  maxDepth: number
+  /** 是否穿越了寫入型邊界——決定它進不進手冊目錄 */
+  isFlow: boolean
+  unresolvedCalls: number
+}
+
+export interface TraceStats {
+  entriesTraced: number
+  entriesUnresolvedHandler: number
+  flows: number
+  programMs: number
+  traceMs: number
+  swaggerEndpoints: number
+  /** 解析不到定義的呼叫，依名稱彙總。缺口要看得見，不能靜默 */
+  unresolvedTop: { name: string; count: number }[]
+  /** 無法起鏈的 handler 表達式，依名稱彙總 */
+  unresolvedHandlerTop: { name: string; count: number }[]
+}
+
+export interface TraceResult {
+  repoRoot: string
+  generatedAt: string
+  chains: FlowChain[]
+  stats: TraceStats
+}
