@@ -149,10 +149,18 @@ program
   .option('--flow <substr>', '只打包 entryId 含此字串的流程')
   .option('--all', '連非流程（純查詢／UI 操作）也打包', false)
   .option('--max-chars <n>', '單一封包的原始碼字元上限', String(defaultPackOptions.maxSourceChars))
+  .option('--limitations <file>', '已知限制清單，會附在總覽末尾', 'LIMITATIONS.md')
   .action(
     (
       chainsFile: string,
-      opts: { outDir: string; domain?: string; flow?: string; all: boolean; maxChars: string }
+      opts: {
+        outDir: string
+        domain?: string
+        flow?: string
+        all: boolean
+        maxChars: string
+        limitations: string
+      }
     ) => {
       if (!fs.existsSync(chainsFile)) {
         console.error(`找不到 ${chainsFile}，請先執行 flow-doc trace`)
@@ -174,7 +182,12 @@ program
         fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
         total += md.length
       }
-      fs.writeFileSync(path.join(opts.outDir, '00-overview.md'), packOverview(result), 'utf8')
+      // 限制清單要跟著目錄走，讀手冊的人才知道「哪些東西手冊不會說」
+      const limitations = fs.existsSync(opts.limitations)
+        ? fs.readFileSync(opts.limitations, 'utf8')
+        : undefined
+      if (!limitations) console.warn(`（找不到 ${opts.limitations}，總覽將不含已知限制章節）`)
+      fs.writeFileSync(path.join(opts.outDir, '00-overview.md'), packOverview(result, limitations), 'utf8')
 
       console.log(`\n已打包 ${chains.length} 條流程到 ${path.resolve(opts.outDir)}`)
       console.log(`  總字元 ${total.toLocaleString()} · 平均 ${chains.length ? Math.round(total / chains.length).toLocaleString() : 0} 字元/流程`)

@@ -184,8 +184,13 @@ export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions =
   return md.join('\n')
 }
 
-/** 產生跨流程的總覽，作為手冊目錄。 */
-export function packOverview(result: TraceResult): string {
+/**
+ * 產生跨流程的總覽，作為手冊目錄。
+ *
+ * 會把 repo 根的 LIMITATIONS.md 原樣附在後面——手冊的讀者必須看得到
+ * 「這份文件沒說什麼」，否則靜態分析的缺口會被誤讀成「系統沒有這些行為」。
+ */
+export function packOverview(result: TraceResult, limitations?: string): string {
   const flows = result.chains.filter(c => c.isFlow)
   const byDomain = new Map<string, FlowChain[]>()
   for (const c of flows) {
@@ -204,6 +209,12 @@ export function packOverview(result: TraceResult): string {
       if (apis.length > 0) md.push(`  - 寫入 API：${apis.map(a => `\`${a}\``).join('、')}`)
     }
     md.push('')
+  }
+
+  if (limitations) {
+    md.push('---')
+    md.push('')
+    md.push(limitations)
   }
   return md.join('\n')
 }
