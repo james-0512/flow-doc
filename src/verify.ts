@@ -5,10 +5,13 @@ import path from 'node:path'
 const REFERENCE = /`([\w./@-]+\.(?:vue|ts|tsx|js|mjs)):(\d+)(?:-(\d+))?`/g
 
 export interface Violation {
-  kind: 'MISSING_FILE' | 'LINE_OUT_OF_RANGE' | 'NOT_IN_PACKET'
+  kind: 'MISSING_FILE' | 'LINE_OUT_OF_RANGE' | 'NOT_IN_PACKET' | 'UNCITED_EFFECT'
   reference: string
   detail: string
 }
+
+/** 封包裡標成寫入的副作用行，例如 `- [API] POST /x（**寫入**）  \`src/a.ts:19\`` */
+const MUTATING_EFFECT = /^- \[[^\]]+\] (.+?)（\*\*寫入\*\*.*?`([\w./@-]+):(\d+)`\s*$/gm
 
 export interface VerifyResult {
   references: number
@@ -74,6 +77,23 @@ export function verifyManual(markdown: string, repoRoot: string, packet?: string
           kind: 'NOT_IN_PACKET',
           reference: ref.raw,
           detail: '此位置不在封包提供的範圍內，可能是臆測'
+        })
+      }
+    }
+  }
+
+  // 反向檢查：封包裡的寫入型副作用，手冊必須都提到。
+  // 只驗「多寫」不驗「漏寫」的話，一份悄悄漏掉某支寫入 API 的手冊會全綠通過——
+  // 而那正是最危險的一種錯誤：讀者會以為那個副作用不存在。
+  if (packet) {
+    const cited = new Set(refs.map(r => `${r.file}:${r.line}`))
+    for (const m of packet.matchAll(MUTATING_EFFECT)) {
+      const key = `${m[2]}:${m[3]}`
+      if (!cited.has(key)) {
+        violations.push({
+          kind: 'UNCITED_EFFECT',
+          reference: `\`${key}\``,
+          detail: `封包標為寫入的副作用「${m[1]!.trim()}」未在手冊中提及`
         })
       }
     }

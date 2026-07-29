@@ -49,21 +49,40 @@ function effectLine(e: SideEffect): string {
   return `[${SINK_LABEL[e.kind]}] ${e.detail}${meta}${note}  \`${e.loc.file}:${e.loc.line}\``
 }
 
-/** 縮排大綱。這是 LLM 理解時序的主要依據，故副作用與子呼叫依原始順序交錯呈現。 */
-function renderOutline(node: ChainNode, depth: number, out: string[]): void {
+const STOP_LABEL: Record<string, string> = {
+  MAX_DEPTH: '達深度上限，未再往下',
+  CYCLE: '遞迴回到上游，未重複展開',
+  BUDGET: '達節點預算，未再往下',
+  BOUNDARY: '停在邊界',
+  UNRESOLVED: '解析不到定義',
+  DUPLICATE: '同前，已於本鏈他處展開'
+}
+
+/**
+ * 縮排大綱。這是 LLM 理解時序的主要依據，故副作用與子呼叫依原始順序交錯呈現。
+ *
+ * `withSource` 是實際附上原始碼的節點集合——沒附到的必須就地標記，否則 LLM 看到
+ * 一個有名字卻沒有程式碼的節點，最可能的行為就是臆測它做了什麼。
+ */
+function renderOutline(node: ChainNode, depth: number, out: string[], withSource: ReadonlySet<string>): void {
   const pad = '  '.repeat(depth)
   const range = node.endLine && node.endLine !== node.loc.line ? `-${node.endLine}` : ''
-  const stop = node.stoppedBy ? `  ⟨停止：${node.stoppedBy}⟩` : ''
+  const stop = node.stoppedBy ? `  ⟨${STOP_LABEL[node.stoppedBy] ?? node.stoppedBy}⟩` : ''
   const cand = node.candidates ? `  ⟨${node.candidates.length} 個實作候選，依注入決定⟩` : ''
-  out.push(`${pad}- **${node.name}**  \`${node.loc.file}:${node.loc.line}${range}\`${stop}${cand}`)
+  const key = `${node.loc.file}:${node.loc.line}`
+  const noSrc = !node.stoppedBy && !withSource.has(key) ? '  ⟨**原始碼未附，不要臆測其內容**⟩' : ''
+  out.push(`${pad}- **${node.name}**  \`${node.loc.file}:${node.loc.line}${range}\`${stop}${cand}${noSrc}`)
 
   for (const e of node.effects) out.push(`${pad}  - ${effectLine(e)}`)
   for (const link of node.asyncLinks ?? []) {
     out.push(`${pad}  - ⇣ **跨元件**：\`emit('${link.event}')\` → \`${link.to.file}:${link.to.line}\` 的 \`${link.handlerExpr}\``)
-    if (link.chain) renderOutline(link.chain, depth + 2, out)
+    if (link.chain) renderOutline(link.chain, depth + 2, out, withSource)
     else out.push(`${pad}    - ⟨父層 handler 解析不到，未展開⟩`)
   }
-  for (const child of node.children) renderOutline(child, depth + 1, out)
+  if (node.omittedListeners) {
+    out.push(`${pad}  - ⟨另有 ${node.omittedListeners} 個父層也監聽此事件，超出上限未展開⟩`)
+  }
+  for (const child of node.children) renderOutline(child, depth + 1, out, withSource)
 }
 
 function collectSources(node: ChainNode, depth: number, out: Map<string, SourceExcerpt>): void {
@@ -103,9 +122,6 @@ function collectLinks(node: ChainNode, out: AsyncLink[]): void {
 export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions = defaultPackOptions): string {
   if (!chain.root) return ''
 
-  const outline: string[] = []
-  renderOutline(chain.root, 0, outline)
-
   const excerpts = new Map<string, SourceExcerpt>()
   collectSources(chain.root, 0, excerpts)
 
@@ -132,12 +148,18 @@ export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions =
     kept.push({ ...ex, code })
   }
 
+  // 大綱要等 kept 算完才能畫，才知道哪些節點沒附到原始碼
+  const withSource = new Set(kept.map(k => k.key))
+  const outline: string[] = []
+  renderOutline(chain.root, 0, outline, withSource)
+
   const md: string[] = []
   md.push(`# 流程封包：${chain.label}`)
   md.push('')
+  md.push(`- 分類：${chain.flowKind === 'write' ? '**寫入型流程**（會改變資料）' : chain.flowKind === 'read' ? '查詢型流程（只讀後端）' : '純 UI 操作（未碰後端）'}`)
   md.push(`- 業務域：\`${chain.domain}\``)
   md.push(`- 觸發點：\`${chain.entryLoc.file}:${chain.entryLoc.line}\``)
-  md.push(`- 節點數 ${chain.nodeCount} · 最大深度 ${chain.maxDepth} · 是否穿越寫入邊界：${chain.isFlow ? '是' : '否'}`)
+  md.push(`- 節點數 ${chain.nodeCount} · 最大深度 ${chain.maxDepth}`)
   if (chain.unresolvedCalls > 0) {
     md.push(`- 鏈中有 ${chain.unresolvedCalls} 個呼叫解析不到定義（多為內建方法），**未包含在下方原始碼中**`)
   }
@@ -184,13 +206,21 @@ export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions =
   return md.join('\n')
 }
 
+/** 業務域的檔名安全化 */
+function domainSlug(domain: string): string {
+  return domain.replace(/[^\w.-]+/g, '_')
+}
+
 /**
- * 產生跨流程的總覽，作為手冊目錄。
+ * 產生手冊目錄。
  *
- * 會把 repo 根的 LIMITATIONS.md 原樣附在後面——手冊的讀者必須看得到
- * 「這份文件沒說什麼」，否則靜態分析的缺口會被誤讀成「系統沒有這些行為」。
+ * 拆成一份總索引 + 每個業務域一份清單：902 條流程擠在單一檔案會到 20 萬字元，
+ * 光為了查某一域的清單就得整份讀進來。這個切分同時就是靜態站的導覽結構。
+ *
+ * 總索引末尾附上 LIMITATIONS.md——讀者必須看得到「這份文件沒說什麼」，
+ * 否則靜態分析的缺口會被誤讀成「系統沒有這些行為」。
  */
-export function packOverview(result: TraceResult, limitations?: string): string {
+export function packOverviews(result: TraceResult, limitations?: string): Map<string, string> {
   const flows = result.chains.filter(c => c.isFlow)
   const byDomain = new Map<string, FlowChain[]>()
   for (const c of flows) {
@@ -198,25 +228,61 @@ export function packOverview(result: TraceResult, limitations?: string): string 
     if (bucket) bucket.push(c)
     else byDomain.set(c.domain, [c])
   }
+  const domains = [...byDomain].sort((a, b) => b[1].length - a[1].length)
+  const out = new Map<string, string>()
 
-  const md: string[] = ['# 系統流程總覽', '', `共 ${flows.length} 條穿越寫入邊界的業務流程，分布於 ${byDomain.size} 個業務域。`, '']
-  for (const [domain, list] of [...byDomain].sort((a, b) => b[1].length - a[1].length)) {
-    md.push(`## ${domain}（${list.length} 條）`)
-    md.push('')
-    for (const c of list) {
-      const apis = c.effects.filter(e => e.kind === 'HTTP_API' && e.mutating).map(e => e.detail)
-      md.push(`- **${c.label}** \`${c.entryLoc.file}:${c.entryLoc.line}\``)
-      if (apis.length > 0) md.push(`  - 寫入 API：${apis.map(a => `\`${a}\``).join('、')}`)
-    }
-    md.push('')
+  const writes = flows.filter(c => c.flowKind === 'write').length
+  const index: string[] = [
+    '# 系統流程總覽',
+    '',
+    `共 ${flows.length} 條業務流程（寫入型 ${writes} · 查詢型 ${flows.length - writes}），分布於 ${domains.length} 個業務域。`,
+    '完全沒有後端互動的純 UI 操作不列入。',
+    ''
+  ]
+
+  if (result.crosscut.length > 0) {
+    index.push('## 全域前置（每條流程都會經過）')
+    index.push('')
+    for (const c of result.crosscut) index.push(`- **${c.label}** \`${c.entryLoc.file}:${c.entryLoc.line}\``)
+    index.push('')
+    index.push('各流程的敘述不重複展開這一段，需要時連結至本章。')
+    index.push('')
   }
+
+  index.push('## 業務域')
+  index.push('')
+  for (const [domain, list] of domains) {
+    const w = list.filter(c => c.flowKind === 'write').length
+    index.push(`- [${domain}](overview-${domainSlug(domain)}.md)　寫入 ${w} · 查詢 ${list.length - w}`)
+  }
+  index.push('')
 
   if (limitations) {
-    md.push('---')
-    md.push('')
-    md.push(limitations)
+    index.push('---')
+    index.push('')
+    index.push(limitations)
   }
-  return md.join('\n')
+  out.set('00-overview.md', index.join('\n'))
+
+  for (const [domain, list] of domains) {
+    const w = list.filter(c => c.flowKind === 'write')
+    const r = list.filter(c => c.flowKind === 'read')
+    const md: string[] = [`# ${domain}`, '', `寫入型 ${w.length} 條 · 查詢型 ${r.length} 條`, '']
+    for (const [title, group] of [['寫入型流程', w], ['查詢型流程', r]] as const) {
+      if (group.length === 0) continue
+      md.push(`## ${title}`)
+      md.push('')
+      for (const c of group) {
+        const apis = c.effects.filter(e => e.kind === 'HTTP_API').map(e => e.detail)
+        md.push(`- **${c.label}** \`${c.entryLoc.file}:${c.entryLoc.line}\``)
+        if (apis.length > 0) md.push(`  - API：${apis.map(a => `\`${a}\``).join('、')}`)
+      }
+      md.push('')
+    }
+    out.set(`overview-${domainSlug(domain)}.md`, md.join('\n'))
+  }
+
+  return out
 }
 
 /** 檔名安全化，供 --out-dir 批次輸出。 */

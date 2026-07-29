@@ -95,13 +95,23 @@ interface SharedCounters {
   emitsUnjoined: number
   emitsModelBinding: number
   unjoinedEmits: Map<string, number>
+  candidatesTruncated: number
+  listenersTruncated: number
+  duplicateNodes: number
 }
 
 /** `update:xxx` 是 v-model 的 writeback，另一端沒有 handler 可接。 */
 const MODEL_WRITEBACK = /^update:/
 
 interface DfsState {
+  /** 目前遞迴路徑上的函式，用來擋環路（進入時加入、離開時移除） */
   visited: Set<string>
+  /**
+   * 本條鏈中已完整展開過的函式（不移除）。
+   * 沒有這層記憶，同一個函式會在不同分支被整棵重展——實測最大的幾條鏈有
+   * 70–76% 的節點是這樣來的，而那些正是最接近 context 預算的封包。
+   */
+  expanded: Set<string>
   nodeBudget: number
   unresolved: number
   maxDepthSeen: number
@@ -194,14 +204,19 @@ function joinEmit(
     return []
   }
 
+  if (edges.length > opts.maxListeners) {
+    state.shared.listenersTruncated += edges.length - opts.maxListeners
+  }
+
   const links: AsyncLink[] = []
   for (const edge of edges.slice(0, opts.maxListeners)) {
     const fn = resolveNamedHandler(t, edge.from, edge.handlerName)
     let chain: ChainNode | null = null
     if (fn && depth < opts.maxDepth && state.nodeBudget > 0) {
       const key = keyOf(fn)
-      if (!state.visited.has(key)) {
+      if (!state.visited.has(key) && !state.expanded.has(key)) {
         state.visited.add(key)
+        state.expanded.add(key)
         state.nodeBudget--
         chain = dfs(t, fn, depth + 1, state, opts, guardedCtx)
         state.visited.delete(key)
@@ -252,8 +267,11 @@ function dfs(
     if (sink) {
       node.effects.push(guardedCtx ? { ...sink, guarded: true } : sink)
       if (sink.kind === 'EMIT' && !sink.detail.startsWith('(')) {
+        const before = state.shared.listenersTruncated
         const links = joinEmit(t, sink.loc.file, sink.detail, sink.loc, depth, state, opts, guardedCtx)
         if (links.length > 0) (node.asyncLinks ??= []).push(...links)
+        const omitted = state.shared.listenersTruncated - before
+        if (omitted > 0) node.omittedListeners = (node.omittedListeners ?? 0) + omitted
       }
       continue
     }
@@ -321,14 +339,30 @@ function dfs(
         continue
       }
 
-      if (followed >= opts.maxCandidates) break
+      if (followed >= opts.maxCandidates) {
+        state.shared.candidatesTruncated++
+        continue
+      }
       const key = keyOf(target)
       if (state.visited.has(key)) {
         node.children.push({ name: nameOf(target), loc: t.locOf(target), effects: [], children: [], stoppedBy: 'CYCLE' })
         continue
       }
+      if (state.expanded.has(key)) {
+        state.shared.duplicateNodes++
+        node.children.push({
+          name: nameOf(target),
+          loc: t.locOf(target),
+          effects: [],
+          children: [],
+          stoppedBy: 'DUPLICATE'
+        })
+        followed++
+        continue
+      }
 
       state.visited.add(key)
+      state.expanded.add(key)
       state.nodeBudget--
       const child = dfs(t, target, depth + 1, state, opts, guardedCtx || isGuarded(call))
       if (candidates) child.candidates = candidates
@@ -377,6 +411,82 @@ function flatten(
   }
 }
 
+function newDfsState(opts: TraceOptions, shared: SharedCounters): DfsState {
+  return {
+    visited: new Set<string>(),
+    expanded: new Set<string>(),
+    nodeBudget: opts.maxNodes,
+    unresolved: 0,
+    maxDepthSeen: 0,
+    shared
+  }
+}
+
+/** 依「有沒有跨越 HTTP 邊界」分類，而非只看寫入——理由見 FlowChain.flowKind。 */
+function classifyFlow(effects: SideEffect[]): FlowChain['flowKind'] {
+  if (effects.some(e => e.mutating)) return 'write'
+  if (effects.some(e => e.kind === 'HTTP_API')) return 'read'
+  return 'none'
+}
+
+/**
+ * 追橫切邏輯：axios 攔截器與路由守衛。
+ *
+ * 這些不是任何一條業務流程的一部分，而是**每一條**都會經過的東西。獨立成鏈，
+ * 手冊寫成單獨一章，各流程連結引用即可。
+ */
+function traceCrosscut(t: Tracer, shared: SharedCounters, opts: TraceOptions): FlowChain[] {
+  const out: FlowChain[] = []
+
+  for (const spec of t.config.crosscut) {
+    const sf = sourceFileFor(t, spec.file)
+    if (!sf) continue
+
+    const roots: { fn: Node; label: string }[] = []
+    if (spec.symbol) {
+      const fn = resolveNamedHandler(t, spec.file, spec.symbol)
+      if (fn) roots.push({ fn, label: spec.label })
+    } else {
+      // 沒指定符號時，找 `xxx.interceptors.request.use(onFulfilled, onRejected)` 的回呼。
+      // 標籤要分得出請求／回應與成功／錯誤，否則手冊只會看到四個「匿名函式」
+      for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const phase = /\.interceptors\.(\w+)\.use$/.exec(normalizeExpr(call))
+        if (!phase) continue
+        const stage = phase[1] === 'request' ? '請求' : '回應'
+        for (const [i, arg] of call.getArguments().entries()) {
+          const fn = toFunctionLike(arg)
+          if (fn) roots.push({ fn, label: `${spec.label} — ${stage}${i === 0 ? '成功' : '錯誤'}` })
+        }
+      }
+    }
+
+    for (const [i, { fn, label }] of roots.entries()) {
+      const state = newDfsState(opts, shared)
+      state.visited.add(keyOf(fn))
+      state.expanded.add(keyOf(fn))
+      const root = dfs(t, fn, 0, state, opts, false)
+      const agg = { effects: [] as SideEffect[], count: 0 }
+      flatten(root, agg, true)
+      const effects = dedupeEffects(agg.effects)
+      out.push({
+        entryId: `crosscut:${spec.file}#${i}`,
+        domain: '全域前置',
+        label,
+        entryLoc: t.locOf(fn),
+        root,
+        effects,
+        nodeCount: agg.count,
+        maxDepth: state.maxDepthSeen,
+        flowKind: classifyFlow(effects),
+        isFlow: true,
+        unresolvedCalls: state.unresolved
+      })
+    }
+  }
+
+  return out
+}
+
 function dedupeEffects(effects: SideEffect[]): SideEffect[] {
   const seen = new Map<string, SideEffect>()
   for (const e of effects) {
@@ -400,7 +510,10 @@ export function traceEntries(
     asyncLinksJoined: 0,
     emitsUnjoined: 0,
     emitsModelBinding: 0,
-    unjoinedEmits: new Map()
+    unjoinedEmits: new Map(),
+    candidatesTruncated: 0,
+    listenersTruncated: 0,
+    duplicateNodes: 0
   }
   let unresolvedHandler = 0
   let flowsGainedByJoin = 0
@@ -410,20 +523,13 @@ export function traceEntries(
   const traceable = scan.entries.filter(e => e.kind === 'UI_EVENT' || e.kind === 'LIFECYCLE')
 
   for (const entry of traceable) {
-    const newState = (): DfsState => ({
-      visited: new Set<string>(),
-      nodeBudget: opts.maxNodes,
-      unresolved: 0,
-      maxDepthSeen: 0,
-      shared
-    })
-
     let root: ChainNode | null = null
-    let state = newState()
+    const state = newDfsState(opts, shared)
 
     const fn = resolveEntryFunction(t, entry)
     if (fn) {
       state.visited.add(keyOf(fn))
+      state.expanded.add(keyOf(fn))
       root = dfs(t, fn, 0, state, opts, false)
     } else {
       // template 上直接寫 `@click="emit('close')"` 的純轉發。它不是「解析失敗」，
@@ -454,8 +560,8 @@ export function traceEntries(
     flatten(root, localOnly, false)
 
     const effects = dedupeEffects(withLinks.effects)
-    const isFlow = effects.some(e => e.mutating)
-    if (isFlow && !localOnly.effects.some(e => e.mutating)) flowsGainedByJoin++
+    const flowKind = classifyFlow(effects)
+    if (flowKind !== 'none' && classifyFlow(localOnly.effects) === 'none') flowsGainedByJoin++
 
     chains.push({
       entryId: entry.id,
@@ -466,19 +572,27 @@ export function traceEntries(
       effects,
       nodeCount: withLinks.count,
       maxDepth: state.maxDepthSeen,
-      isFlow,
+      flowKind,
+      isFlow: flowKind !== 'none',
       unresolvedCalls: state.unresolved
     })
   }
+
+  const crosscut = traceCrosscut(t, shared, opts)
 
   return {
     repoRoot: ws.config.repoRoot,
     generatedAt: new Date().toISOString(),
     chains,
+    crosscut,
     stats: {
       entriesTraced: traceable.length,
       entriesUnresolvedHandler: unresolvedHandler,
-      flows: chains.filter(c => c.isFlow).length,
+      flows: chains.filter(c => c.flowKind === 'write').length,
+      readFlows: chains.filter(c => c.flowKind === 'read').length,
+      candidatesTruncated: shared.candidatesTruncated,
+      listenersTruncated: shared.listenersTruncated,
+      duplicateNodes: shared.duplicateNodes,
       programMs: t.program.elapsedMs,
       traceMs: Date.now() - started,
       swaggerEndpoints: t.swagger.size,

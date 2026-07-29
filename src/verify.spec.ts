@@ -28,6 +28,20 @@ describe('verifyManual', () => {
     expect(result.violations).toMatchObject([{ kind: 'NOT_IN_PACKET' }])
   })
 
+  it('抓到手冊漏掉封包裡的寫入型副作用', () => {
+    // 只驗「多寫」不驗「漏寫」的話，悄悄漏掉一支寫入 API 的手冊會全綠通過，
+    // 而讀者會以為那個副作用不存在
+    const packet = [
+      '- **createDemo** `src/api/demo.ts:3-5`',
+      '- [API] POST /api/v1/demo/create（**寫入**）  `src/api/demo.ts:4`'
+    ].join('\n')
+    const missing = verifyManual('這一步呼叫了 `src/api/demo.ts:3`。', REPO, packet)
+    expect(missing.violations).toMatchObject([{ kind: 'UNCITED_EFFECT' }])
+
+    const cited = verifyManual('建立資料 `src/api/demo.ts:4`。', REPO, packet)
+    expect(cited.violations).toEqual([])
+  })
+
   it('封包給的是區間時，區間內任一行都算合法引用', () => {
     const packet = '- **createDemo** `src/api/demo.ts:3-5`'
     expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, packet).violations).toEqual([])

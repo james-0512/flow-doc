@@ -5,7 +5,7 @@ import { Command } from 'commander'
 import { loadConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
-import { defaultPackOptions, packFileName, packFlow, packOverview } from './pack.js'
+import { defaultPackOptions, packFileName, packFlow, packOverviews } from './pack.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
 
@@ -47,7 +47,14 @@ function printTraceSummary(result: TraceResult): void {
   console.log(`\n追蹤完成（建 Program ${stats.programMs} ms · 追鏈 ${stats.traceMs} ms）`)
   console.log(`  swagger 端點索引 ${stats.swaggerEndpoints}`)
   console.log(`  可追蹤 entry ${stats.entriesTraced} · 成功起鏈 ${chains.length} · handler 無法解析 ${stats.entriesUnresolvedHandler}`)
-  console.log(`\n穿越寫入邊界的流程 ${flows.length} 條（其餘 ${chains.length - flows.length} 條為純查詢／UI 操作）`)
+  console.log(
+    `\n流程 ${flows.length} 條：寫入型 ${stats.flows} · 查詢型 ${stats.readFlows}` +
+      `（其餘 ${chains.length - flows.length} 條完全沒碰後端，為純 UI 操作）`
+  )
+  if (result.crosscut.length > 0) {
+    console.log(`橫切邏輯 ${result.crosscut.length} 條（每條流程都會經過，獨立成章）：`)
+    for (const c of result.crosscut) console.log(`  ${c.label.padEnd(26)} 節點 ${c.nodeCount} · 副作用 ${c.effects.length}`)
+  }
 
   const byKind = new Map<string, number>()
   for (const c of chains) for (const e of c.effects) byKind.set(e.kind, (byKind.get(e.kind) ?? 0) + 1)
@@ -72,6 +79,11 @@ function printTraceSummary(result: TraceResult): void {
   console.log(`  v-model writeback（無 handler 可接，非缺口） ${stats.emitsModelBinding} 處`)
   console.log(`  找不到 parent listener 的 emit ${stats.emitsUnjoined} 處，出處：`)
   for (const { name, count } of stats.unjoinedEmitTop.slice(0, 8)) console.log(`    ${String(count).padStart(4)}  ${name}`)
+
+  console.log(`\n上限與去重（都不靜默）：`)
+  console.log(`  多實作候選未展開 ${stats.candidatesTruncated} 個（maxCandidates）`)
+  console.log(`  parent listener 未展開 ${stats.listenersTruncated} 個（maxListeners）`)
+  console.log(`  以參照取代的重複節點 ${stats.duplicateNodes} 個`)
 
   const unresolvedTotal = chains.reduce((s, c) => s + c.unresolvedCalls, 0)
   console.log(`\n已知缺口：鏈中解析不到定義的呼叫 ${unresolvedTotal} 次，最常見的：`)
@@ -176,7 +188,7 @@ program
       fs.mkdirSync(opts.outDir, { recursive: true })
       const packOpts = { maxSourceChars: Number(opts.maxChars) }
       let total = 0
-      for (const chain of chains) {
+      for (const chain of [...result.crosscut, ...chains]) {
         const md = packFlow(result.repoRoot, chain, packOpts)
         if (!md) continue
         fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
@@ -187,11 +199,12 @@ program
         ? fs.readFileSync(opts.limitations, 'utf8')
         : undefined
       if (!limitations) console.warn(`（找不到 ${opts.limitations}，總覽將不含已知限制章節）`)
-      fs.writeFileSync(path.join(opts.outDir, '00-overview.md'), packOverview(result, limitations), 'utf8')
+      const overviews = packOverviews(result, limitations)
+      for (const [name, md] of overviews) fs.writeFileSync(path.join(opts.outDir, name), md, 'utf8')
 
-      console.log(`\n已打包 ${chains.length} 條流程到 ${path.resolve(opts.outDir)}`)
+      console.log(`\n已打包 ${chains.length} 條流程 + ${result.crosscut.length} 條全域前置到 ${path.resolve(opts.outDir)}`)
       console.log(`  總字元 ${total.toLocaleString()} · 平均 ${chains.length ? Math.round(total / chains.length).toLocaleString() : 0} 字元/流程`)
-      console.log(`  目錄檔：00-overview.md`)
+      console.log(`  目錄：00-overview.md + ${overviews.size - 1} 份業務域清單`)
     }
   )
 

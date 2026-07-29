@@ -133,7 +133,14 @@ export interface SideEffect {
   note?: string
 }
 
-export type StopReason = 'MAX_DEPTH' | 'CYCLE' | 'BUDGET' | 'BOUNDARY' | 'UNRESOLVED'
+export type StopReason =
+  | 'MAX_DEPTH'
+  | 'CYCLE'
+  | 'BUDGET'
+  | 'BOUNDARY'
+  | 'UNRESOLVED'
+  /** 同一個函式已在本條鏈的別處完整展開過，這裡只放參照，不重複整棵子樹 */
+  | 'DUPLICATE'
 
 /**
  * 非同步／跨元件的控制流連結。
@@ -164,6 +171,8 @@ export interface ChainNode {
   children: ChainNode[]
   /** 本節點的 emit 接到哪些 parent handler。一個事件可能有多個 parent，全部列出不硬選 */
   asyncLinks?: AsyncLink[]
+  /** 因為超過上限而沒有展開的 parent listener 數。上限必須看得見，不能靜默截斷 */
+  omittedListeners?: number
   /**
    * 呼叫解析出多個候選定義（interface 多實作、多載）時全部列出，**不硬選**。
    * plan.md §3 的原則：交由 LLM 於生成時說明「依注入／設定決定」。
@@ -182,7 +191,18 @@ export interface FlowChain {
   effects: SideEffect[]
   nodeCount: number
   maxDepth: number
-  /** 是否穿越了寫入型邊界——決定它進不進手冊目錄 */
+  /**
+   * 流程分類。判準是「鏈中有沒有跨越 HTTP 邊界」：
+   * - `write` 有寫入型 API 或 storage 寫入
+   * - `read`  只讀，但確實打了後端（搜尋、篩選、檢視明細、頁面載入）
+   * - `none`  完全沒碰後端，是純 UI 開關（開 modal、切 tab、toggle）
+   *
+   * 原本只收 write，導致 339 條流程裡只有 4 條是頁面載入，手冊對「進入這頁會
+   * 發生什麼」幾乎空白。改用 HTTP 邊界後仍有 942 條純 UI 鏈被擋掉，
+   * 原本的過濾目的不受影響。
+   */
+  flowKind: 'write' | 'read' | 'none'
+  /** `flowKind !== 'none'` */
   isFlow: boolean
   unresolvedCalls: number
 }
@@ -190,7 +210,16 @@ export interface FlowChain {
 export interface TraceStats {
   entriesTraced: number
   entriesUnresolvedHandler: number
+  /** 寫入型流程 */
   flows: number
+  /** 查詢型流程 */
+  readFlows: number
+  /** 因超過 maxCandidates 而未展開的多實作候選數 */
+  candidatesTruncated: number
+  /** 因超過 maxListeners 而未展開的 parent listener 數 */
+  listenersTruncated: number
+  /** 因已在鏈中別處展開過而以參照取代的節點數 */
+  duplicateNodes: number
   programMs: number
   traceMs: number
   swaggerEndpoints: number
@@ -218,5 +247,12 @@ export interface TraceResult {
   repoRoot: string
   generatedAt: string
   chains: FlowChain[]
+  /**
+   * 橫切邏輯的鏈：axios 攔截器與路由守衛。
+   *
+   * 每條業務流程都會經過它們，但若在每條流程裡展開一次，手冊會被重複的
+   * token 注入、載入狀態、MFA challenge 淹沒。改成獨立一章、各流程連結引用。
+   */
+  crosscut: FlowChain[]
   stats: TraceStats
 }

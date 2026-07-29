@@ -21,6 +21,11 @@ export interface AnalyzerConfig {
   routerDir: string
   /** import 路徑別名，前綴替換。取自目標專案 tsconfig 的 paths。 */
   aliases: Record<string, string>
+  /**
+   * 橫切邏輯的入口。每條業務流程都會經過這些，但不該在每條流程裡重複展開。
+   * `symbol` 省略時自動尋找該檔的 axios interceptor 註冊。
+   */
+  crosscut: { file: string; symbol?: string; label: string }[]
   /** 掃描時排除的 glob（相對 repo 根） */
   exclude: string[]
 }
@@ -56,6 +61,10 @@ export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
     globalComponentsDts: 'src/components.d.ts',
     routerDir: 'src/router',
     aliases: { '@/': 'src/', '@config/': '' },
+    crosscut: [
+      { file: 'src/router/guards/index.ts', symbol: 'buildGuards', label: '路由守衛管線' },
+      { file: 'src/utils/service/api.service.ts', label: 'API 請求／回應攔截器' }
+    ],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

@@ -79,10 +79,26 @@ describe('call chain 追蹤（fixture）', () => {
     expect(names(chain.root!)).not.toContain('formatName')
   })
 
-  it('純查詢的 lifecycle 不算流程', () => {
+  it('頁面載入只讀後端，算查詢型流程而非排除', () => {
+    // 判準是「有沒有跨越 HTTP 邊界」而非「有沒有寫入」——只收寫入的話，
+    // 「進入這頁會發生什麼」永遠不會進手冊
     const chain = chainOf('onMounted')
-    expect(chain.isFlow).toBe(false)
-    expect(chain.effects.map(e => e.kind)).toContain('STORE')
+    expect(chain.flowKind).toBe('read')
+    expect(chain.isFlow).toBe(true)
+    expect(chain.effects.find(e => e.kind === 'HTTP_API')).toMatchObject({
+      detail: 'GET /api/v1/demo/list',
+      mutating: false
+    })
+  })
+
+  it('完全沒碰後端的純 UI 操作仍被排除', () => {
+    const none = trace.chains.filter(c => c.flowKind === 'none')
+    expect(none.length).toBeGreaterThan(0)
+    expect(none.every(c => !c.effects.some(e => e.kind === 'HTTP_API'))).toBe(true)
+  })
+
+  it('寫入型與查詢型要分得開', () => {
+    expect(chainOf('IndexView.vue:2:button:click').flowKind).toBe('write')
   })
 
   it('handler 行號指回 .vue，不是虛擬檔', () => {
