@@ -64,6 +64,13 @@ function printTraceSummary(result: TraceResult): void {
     console.log(`\n最大的一條鏈：${deepest.label}`)
     console.log(`  節點 ${deepest.nodeCount} · 深度 ${deepest.maxDepth} · 副作用 ${deepest.effects.length}`)
   }
+  console.log(`\n非同步接合（階段三）：`)
+  console.log(`  emit → parent handler 接起 ${stats.asyncLinksJoined} 條`)
+  console.log(`  因為接上 parent 才成為流程的 entry ${stats.flowsGainedByJoin} 條`)
+  console.log(`  v-model writeback（無 handler 可接，非缺口） ${stats.emitsModelBinding} 處`)
+  console.log(`  找不到 parent listener 的 emit ${stats.emitsUnjoined} 處，出處：`)
+  for (const { name, count } of stats.unjoinedEmitTop.slice(0, 8)) console.log(`    ${String(count).padStart(4)}  ${name}`)
+
   const unresolvedTotal = chains.reduce((s, c) => s + c.unresolvedCalls, 0)
   console.log(`\n已知缺口：鏈中解析不到定義的呼叫 ${unresolvedTotal} 次，最常見的：`)
   for (const { name, count } of stats.unresolvedTop.slice(0, 12)) console.log(`  ${String(count).padStart(5)}  ${name}`)

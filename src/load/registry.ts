@@ -24,8 +24,19 @@ export function parseGlobalComponents(source: string, dtsRel: string): Map<strin
   return map
 }
 
+/**
+ * kebab-case → camelCase。
+ *
+ * Vue 讓 `emit('updateParams')` 與 template 的 `@update-params` 互通，兩種寫法
+ * 在這個 repo 都大量出現。做 emit ↔ listener 的 join 之前必須先正規化，
+ * 否則同一條連結會被當成兩個不相干的名字而接不起來。
+ */
+export function camelize(name: string): string {
+  return name.replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase())
+}
+
 /** `util-table` / `utilTable` / `UtilTable` 一律正規化成 PascalCase 以供查表。 */
 export function normalizeTag(tag: string): string {
-  const camel = tag.replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase())
+  const camel = camelize(tag)
   return camel.charAt(0).toUpperCase() + camel.slice(1)
 }

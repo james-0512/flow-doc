@@ -51,6 +51,23 @@ grill 階段定案的六個決策，以及它們對 [plan.md](plan.md) 的修正
 **對 plan.md 的修正**：plan.md §3 階段三整章的 `eventBus.emit("X")` ↔ `@OnEvent("X")` 字串 join
 在本專案零命中，替換為上表。
 
+### D4 補充（階段三實作後）
+
+實作 emit join 時浮現三件當初沒想到的事，一併定案：
+
+1. **事件名要 camelize 才能 join。** Vue 讓 `emit('updateParams')` 與 template 的 `@update-params`
+   互通，兩種寫法在這個 repo 都大量出現。不正規化的話同一條連結會被當成兩個名字——
+   實測修正後接合數從 248 跳到 470。
+2. **`emit('update:x')` 的 writeback 不是缺口。** 全 repo 有 417 個（41%）的 emit 屬於這一類，
+   而 template 有 940 個 `v-model=`。v-model 的另一端只是父層的 ref 賦值、沒有 handler 可接，
+   正是 D4 排除的 reactive 類別。統計上必須與真缺口分開，否則會把非缺口報成缺口。
+3. **`components/Utils/*` 的 emit 接不到是設計使然。** 依 D5，父層綁在 Utils 元件上的事件
+   已記成 entry（因為觸發點在我們不掃描的元件內部），所以流程從父層那側就捕捉到了，
+   不需要也不應該再從 Utils 內部往回接。
+
+殘餘無法接合的 121 處中，最大宗是 `<component :is="...">` 上的 listener（動態元件，
+標籤解析不到檔案）——這與 plan.md §5 的「interface 多型無法靜態決定」同類，屬已知極限。
+
 ## D5 — 邊界改成三分法，白名單制控制雜訊
 
 plan.md §3 的邊界表把「停止點」與「副作用記錄點」混為一談，拆成：

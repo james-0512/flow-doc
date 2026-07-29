@@ -25,8 +25,9 @@ function reset() {
   loadDemo()
 }
 
+/** 子元件的送出鈕本身只 emit，真正的業務動作在這裡——階段三要接得起來 */
 function onFormSubmit() {
-  reset()
+  void save()
 }
 
 onMounted(() => {

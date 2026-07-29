@@ -135,11 +135,33 @@ export interface SideEffect {
 
 export type StopReason = 'MAX_DEPTH' | 'CYCLE' | 'BUDGET' | 'BOUNDARY' | 'UNRESOLVED'
 
+/**
+ * 非同步／跨元件的控制流連結。
+ *
+ * 在這個 repo，最大宗的斷點不是後端那種全域 event bus，而是子元件 `emit` 到
+ * parent template 的 `@listener`——ts-morph 完全看不到這條邊，因為它跨越了
+ * template。join key 是「子元件檔案 + 事件名」。
+ */
+export interface AsyncLink {
+  kind: 'EMIT' | 'SIGNALR' | 'BROADCAST'
+  event: string
+  /** 發送點（子元件內的 emit） */
+  from: SourceLoc
+  /** 接收點（parent template 上的 @listener） */
+  to: SourceLoc
+  /** parent 的 handler 表達式 */
+  handlerExpr: string
+  /** 接住之後展開的子鏈；handler 解析不到時為 null */
+  chain: ChainNode | null
+}
+
 export interface ChainNode {
   name: string
   loc: SourceLoc
   effects: SideEffect[]
   children: ChainNode[]
+  /** 本節點的 emit 接到哪些 parent handler。一個事件可能有多個 parent，全部列出不硬選 */
+  asyncLinks?: AsyncLink[]
   /**
    * 呼叫解析出多個候選定義（interface 多實作、多載）時全部列出，**不硬選**。
    * plan.md §3 的原則：交由 LLM 於生成時說明「依注入／設定決定」。
@@ -174,6 +196,20 @@ export interface TraceStats {
   unresolvedTop: { name: string; count: number }[]
   /** 無法起鏈的 handler 表達式，依名稱彙總 */
   unresolvedHandlerTop: { name: string; count: number }[]
+  /** 成功接起來的 emit → parent handler 連結數 */
+  asyncLinksJoined: number
+  /** 找不到任何 parent listener 的 emit——真缺口 */
+  emitsUnjoined: number
+  /**
+   * `emit('update:x')` 且父層以 `v-model` 綁定的 writeback。
+   * 另一端只是 ref 賦值、沒有 handler 可接，屬 D4 明確排除的 reactive 類別，
+   * 不是缺口。分開計數以免把非缺口報成缺口。
+   */
+  emitsModelBinding: number
+  /** 接不到的 emit 出處，依「檔案 @事件」彙總，供判斷是真缺口還是設計使然 */
+  unjoinedEmitTop: { name: string; count: number }[]
+  /** 因為接上 parent 才成為流程的 entry 數——這是階段三的實際貢獻 */
+  flowsGainedByJoin: number
 }
 
 export interface TraceResult {

@@ -1,18 +1,21 @@
 import path from 'node:path'
 import { Node, SyntaxKind } from 'ts-morph'
-import type { CallExpression } from 'ts-morph'
+import type { CallExpression, SourceFile } from 'ts-morph'
 import { classifyPath } from '../config.js'
 import type { AnalyzerConfig } from '../config.js'
 import type { Workspace } from '../workspace.js'
 import type {
+  AsyncLink,
   ChainNode,
   EntryCandidate,
   EntryScanResult,
   FlowChain,
+  ListenerEdge,
   SideEffect,
   SourceLoc,
   TraceResult
 } from '../types.js'
+import { camelize } from '../load/registry.js'
 import { callsWithin, detectSink, isGuarded, toFunctionLike, type SinkContext } from './boundary.js'
 import { createAnalysisProgram, readSwaggerSource } from './program.js'
 import { indexSwaggerApi } from './swagger.js'
@@ -23,9 +26,16 @@ export interface TraceOptions {
   maxNodes: number
   /** 一個呼叫解析出多個定義時，最多往下追幾個 */
   maxCandidates: number
+  /** 一個 emit 最多接幾個 parent listener（共用元件可能有數十個父層） */
+  maxListeners: number
 }
 
-export const defaultTraceOptions: TraceOptions = { maxDepth: 8, maxNodes: 250, maxCandidates: 2 }
+export const defaultTraceOptions: TraceOptions = {
+  maxDepth: 8,
+  maxNodes: 250,
+  maxCandidates: 2,
+  maxListeners: 5
+}
 
 /**
  * 不值得付 Type Checker 成本去解析的呼叫。
@@ -44,8 +54,10 @@ const NOISE_PREFIX = /^(console|JSON|Math|Object|Array|Number|String|Date|Promis
 const REF_BUILTIN = /\.value\.(push|pop|shift|unshift|splice|slice|concat|indexOf|lastIndexOf|includes|find|findIndex|filter|map|forEach|some|every|reduce|sort|reverse|join|fill|flat|at|keys|values|entries)$/
 /** Promise executor 的回呼參數，永遠解析不到定義。 */
 const PROMISE_CALLBACK = /^(resolve|reject|next|done)$/
+/** template 上直接寫 `@click="emit('close')"` 的純轉發 handler。 */
+const INLINE_EMIT = /^\$?emit\(\s*['"]([^'"]+)['"]/
 
-export function createTracer(ws: Workspace) {
+export function createTracer(ws: Workspace, scan: EntryScanResult) {
   const { repoRoot } = ws.config
   const program = createAnalysisProgram(ws)
   const swaggerSource = readSwaggerSource(repoRoot)
@@ -59,13 +71,53 @@ export function createTracer(ws: Workspace) {
     return { file: rel, line: node.getStartLineNumber() }
   }
 
-  const relOf = (node: Node): string => locOf(node).file
-  const ctx: SinkContext = { swagger, locOf }
+  // 階段三的 join 索引：`子元件檔案|事件名` → 所有掛了這個 listener 的 parent。
+  // 事件名一律 camelize，因為 template 慣用 kebab-case 而 emit 慣用 camelCase。
+  const listenerIndex = new Map<string, ListenerEdge[]>()
+  for (const edge of scan.listeners) {
+    if (!edge.toComponent) continue
+    const key = `${edge.toComponent}|${camelize(edge.event)}`
+    const bucket = listenerIndex.get(key)
+    if (bucket) bucket.push(edge)
+    else listenerIndex.set(key, [edge])
+  }
 
-  return { project: program.project, program, swagger, locOf, relOf, ctx, config: ws.config }
+  const ctx: SinkContext = { swagger, locOf }
+  return { project: program.project, program, swagger, locOf, ctx, listenerIndex, config: ws.config }
 }
 
 type Tracer = ReturnType<typeof createTracer>
+
+interface SharedCounters {
+  unresolvedNames: Map<string, number>
+  unresolvedHandlers: Map<string, number>
+  asyncLinksJoined: number
+  emitsUnjoined: number
+  emitsModelBinding: number
+  unjoinedEmits: Map<string, number>
+}
+
+/** `update:xxx` 是 v-model 的 writeback，另一端沒有 handler 可接。 */
+const MODEL_WRITEBACK = /^update:/
+
+interface DfsState {
+  visited: Set<string>
+  nodeBudget: number
+  unresolved: number
+  maxDepthSeen: number
+  shared: SharedCounters
+}
+
+function tally(counter: Map<string, number>, name: string): void {
+  counter.set(name, (counter.get(name) ?? 0) + 1)
+}
+
+function topOf(counter: Map<string, number>, n: number): { name: string; count: number }[] {
+  return [...counter]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([name, count]) => ({ name, count }))
+}
 
 function nameOf(fn: Node): string {
   if (Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn)) return fn.getName() ?? '(匿名函式)'
@@ -76,6 +128,10 @@ function nameOf(fn: Node): string {
     if (Node.isVariableDeclaration(n) || Node.isPropertyAssignment(n)) return n.getName()
   }
   return '(匿名函式)'
+}
+
+function keyOf(fn: Node): string {
+  return `${fn.getSourceFile().getFilePath()}#${fn.getPos()}`
 }
 
 /** 用 Type Checker 解析呼叫指向的實際定義——這是 tree-sitter 做不到、也是本專案採用 ts-morph 的唯一理由。 */
@@ -94,28 +150,74 @@ function resolveCallTarget(call: CallExpression): Node[] {
   }
 }
 
-interface DfsState {
-  visited: Set<string>
-  nodeBudget: number
-  unresolved: number
-  maxDepthSeen: number
-  /** 跨鏈共用：解析不到的呼叫名稱統計 */
-  unresolvedNames: Map<string, number>
+function sourceFileFor(t: Tracer, rel: string): SourceFile | undefined {
+  return t.project.getSourceFile(
+    path.join(t.config.repoRoot, rel.endsWith('.vue') ? `${rel}.ts` : rel)
+  )
 }
 
-function tally(counter: Map<string, number>, name: string): void {
-  counter.set(name, (counter.get(name) ?? 0) + 1)
+/** 以名稱在某個檔案的頂層作用域找 handler 函式。 */
+function resolveNamedHandler(t: Tracer, rel: string, name: string | undefined): Node | null {
+  if (!name || name.includes('.')) return null
+  const sf = sourceFileFor(t, rel)
+  if (!sf) return null
+  const decl = sf.getFunction(name) ?? sf.getVariableDeclaration(name)
+  return decl ? toFunctionLike(decl) : null
 }
 
-function topOf(counter: Map<string, number>, n: number): { name: string; count: number }[] {
-  return [...counter]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, n)
-    .map(([name, count]) => ({ name, count }))
-}
+/**
+ * 把 `emit('X')` 接到所有掛了 `@X` 的 parent handler。
+ *
+ * 一個共用元件可能被數十個父層使用，全部展開會爆炸——所以有 maxListeners 上限，
+ * 且**不硬選一個**：超出上限的部分在 stats 裡看得見。
+ */
+function joinEmit(
+  t: Tracer,
+  emitFile: string,
+  event: string,
+  from: SourceLoc,
+  depth: number,
+  state: DfsState,
+  opts: TraceOptions,
+  guardedCtx: boolean
+): AsyncLink[] {
+  const edges = t.listenerIndex.get(`${emitFile}|${camelize(event)}`)
+  if (!edges || edges.length === 0) {
+    // 父層可能是用 `@update:x="handler"` 明確接（上面查得到），也可能是 `v-model`
+    // （查不到）。只有後者才不是缺口。
+    if (MODEL_WRITEBACK.test(event)) {
+      state.shared.emitsModelBinding++
+    } else {
+      state.shared.emitsUnjoined++
+      tally(state.shared.unjoinedEmits, `${emitFile} @${event}`)
+    }
+    return []
+  }
 
-function keyOf(fn: Node): string {
-  return `${fn.getSourceFile().getFilePath()}#${fn.getPos()}`
+  const links: AsyncLink[] = []
+  for (const edge of edges.slice(0, opts.maxListeners)) {
+    const fn = resolveNamedHandler(t, edge.from, edge.handlerName)
+    let chain: ChainNode | null = null
+    if (fn && depth < opts.maxDepth && state.nodeBudget > 0) {
+      const key = keyOf(fn)
+      if (!state.visited.has(key)) {
+        state.visited.add(key)
+        state.nodeBudget--
+        chain = dfs(t, fn, depth + 1, state, opts, guardedCtx)
+        state.visited.delete(key)
+      }
+    }
+    links.push({
+      kind: 'EMIT',
+      event,
+      from,
+      to: edge.loc,
+      handlerExpr: edge.handlerExpr,
+      chain
+    })
+    state.shared.asyncLinksJoined++
+  }
+  return links
 }
 
 function dfs(
@@ -143,6 +245,10 @@ function dfs(
     const sink = detectSink(call, t.ctx)
     if (sink) {
       node.effects.push(guardedCtx ? { ...sink, guarded: true } : sink)
+      if (sink.kind === 'EMIT' && !sink.detail.startsWith('(')) {
+        const links = joinEmit(t, sink.loc.file, sink.detail, sink.loc, depth, state, opts, guardedCtx)
+        if (links.length > 0) (node.asyncLinks ??= []).push(...links)
+      }
       continue
     }
 
@@ -159,7 +265,7 @@ function dfs(
     const targets = resolveCallTarget(call)
     if (targets.length === 0) {
       state.unresolved++
-      tally(state.unresolvedNames, exprText)
+      tally(state.shared.unresolvedNames, exprText)
       continue
     }
 
@@ -177,7 +283,7 @@ function dfs(
     }
     if (resolved.length === 0) {
       state.unresolved++
-      tally(state.unresolvedNames, exprText)
+      tally(state.shared.unresolvedNames, exprText)
       continue
     }
 
@@ -185,7 +291,7 @@ function dfs(
     let followed = 0
 
     for (const target of resolved) {
-      const rel = t.relOf(target)
+      const rel = t.locOf(target).file
       const kind = classifyPath(t.config, rel)
 
       if (rel.startsWith('src/stores/')) {
@@ -194,7 +300,7 @@ function dfs(
           detail: `${rel.replace(/^src\/stores\//, '').replace(/\.ts$/, '')}.${nameOf(target)}`,
           mutating: false,
           loc: t.locOf(call),
-          guarded: false
+          guarded: guardedCtx
         })
       }
 
@@ -235,9 +341,7 @@ function dfs(
  * - UI_EVENT：以 handler 名稱在該 SFC 的頂層作用域查找
  */
 function resolveEntryFunction(t: Tracer, entry: EntryCandidate): Node | null {
-  const sf = t.project.getSourceFile(
-    path.join(t.config.repoRoot, entry.file.endsWith('.vue') ? `${entry.file}.ts` : entry.file)
-  )
+  const sf = sourceFileFor(t, entry.file)
   if (!sf) return null
 
   if (entry.kind === 'LIFECYCLE') {
@@ -250,16 +354,21 @@ function resolveEntryFunction(t: Tracer, entry: EntryCandidate): Node | null {
     return null
   }
 
-  const name = entry.handlerName
-  if (!name || name.includes('.')) return null
-  const decl = sf.getFunction(name) ?? sf.getVariableDeclaration(name)
-  return decl ? toFunctionLike(decl) : null
+  return resolveNamedHandler(t, entry.file, entry.handlerName)
 }
 
-function flatten(node: ChainNode, out: { effects: SideEffect[]; count: number }): void {
+function flatten(
+  node: ChainNode,
+  out: { effects: SideEffect[]; count: number },
+  followLinks: boolean
+): void {
   out.count++
   out.effects.push(...node.effects)
-  for (const child of node.children) flatten(child, out)
+  for (const child of node.children) flatten(child, out, followLinks)
+  if (!followLinks) return
+  for (const link of node.asyncLinks ?? []) {
+    if (link.chain) flatten(link.chain, out, followLinks)
+  }
 }
 
 function dedupeEffects(effects: SideEffect[]): SideEffect[] {
@@ -276,40 +385,71 @@ export function traceEntries(
   scan: EntryScanResult,
   opts: TraceOptions = defaultTraceOptions
 ): TraceResult {
-  const t = createTracer(ws)
+  const t = createTracer(ws, scan)
   const started = Date.now()
   const chains: FlowChain[] = []
-  const unresolvedNames = new Map<string, number>()
-  const unresolvedHandlers = new Map<string, number>()
+  const shared: SharedCounters = {
+    unresolvedNames: new Map(),
+    unresolvedHandlers: new Map(),
+    asyncLinksJoined: 0,
+    emitsUnjoined: 0,
+    emitsModelBinding: 0,
+    unjoinedEmits: new Map()
+  }
   let unresolvedHandler = 0
+  let flowsGainedByJoin = 0
 
   // ROUTE 不獨立追鏈：進入頁面實際執行的是該元件的 lifecycle，
   // 那些已由 LIFECYCLE entry 覆蓋，重複追只會產生兩份相同的鏈。
   const traceable = scan.entries.filter(e => e.kind === 'UI_EVENT' || e.kind === 'LIFECYCLE')
 
   for (const entry of traceable) {
-    const fn = resolveEntryFunction(t, entry)
-    if (!fn) {
-      // handler 是賦值式（`show = !show`）或成員存取（`store.load`）時無法起鏈，
-      // 前者本來就不是流程，後者是已知缺口
-      if (entry.handlerName) {
-        unresolvedHandler++
-        tally(unresolvedHandlers, entry.handlerName)
-      }
-      continue
-    }
-
-    const state: DfsState = {
-      visited: new Set([keyOf(fn)]),
+    const newState = (): DfsState => ({
+      visited: new Set<string>(),
       nodeBudget: opts.maxNodes,
       unresolved: 0,
       maxDepthSeen: 0,
-      unresolvedNames
+      shared
+    })
+
+    let root: ChainNode | null = null
+    let state = newState()
+
+    const fn = resolveEntryFunction(t, entry)
+    if (fn) {
+      state.visited.add(keyOf(fn))
+      root = dfs(t, fn, 0, state, opts, false)
+    } else {
+      // template 上直接寫 `@click="emit('close')"` 的純轉發。它不是「解析失敗」，
+      // 而是一個沒有本地邏輯、直接跨到 parent 的斷點——階段三正好接得起來。
+      const inlineEmit = entry.handlerExpr ? INLINE_EMIT.exec(entry.handlerExpr) : null
+      if (inlineEmit) {
+        const event = inlineEmit[1]!
+        root = {
+          name: `emit('${event}')`,
+          loc: entry.loc,
+          effects: [{ kind: 'EMIT', detail: event, mutating: false, loc: entry.loc }],
+          children: []
+        }
+        const links = joinEmit(t, entry.file, event, entry.loc, 0, state, opts, false)
+        if (links.length > 0) root.asyncLinks = links
+      } else {
+        if (entry.handlerName) {
+          unresolvedHandler++
+          tally(shared.unresolvedHandlers, entry.handlerName)
+        }
+        continue
+      }
     }
-    const root = dfs(t, fn, 0, state, opts, false)
-    const agg = { effects: [] as SideEffect[], count: 0 }
-    flatten(root, agg)
-    const effects = dedupeEffects(agg.effects)
+
+    const withLinks = { effects: [] as SideEffect[], count: 0 }
+    flatten(root, withLinks, true)
+    const localOnly = { effects: [] as SideEffect[], count: 0 }
+    flatten(root, localOnly, false)
+
+    const effects = dedupeEffects(withLinks.effects)
+    const isFlow = effects.some(e => e.mutating)
+    if (isFlow && !localOnly.effects.some(e => e.mutating)) flowsGainedByJoin++
 
     chains.push({
       entryId: entry.id,
@@ -318,9 +458,9 @@ export function traceEntries(
       entryLoc: entry.loc,
       root,
       effects,
-      nodeCount: agg.count,
+      nodeCount: withLinks.count,
       maxDepth: state.maxDepthSeen,
-      isFlow: effects.some(e => e.mutating),
+      isFlow,
       unresolvedCalls: state.unresolved
     })
   }
@@ -336,8 +476,13 @@ export function traceEntries(
       programMs: t.program.elapsedMs,
       traceMs: Date.now() - started,
       swaggerEndpoints: t.swagger.size,
-      unresolvedTop: topOf(unresolvedNames, 20),
-      unresolvedHandlerTop: topOf(unresolvedHandlers, 20)
+      unresolvedTop: topOf(shared.unresolvedNames, 20),
+      unresolvedHandlerTop: topOf(shared.unresolvedHandlers, 20),
+      asyncLinksJoined: shared.asyncLinksJoined,
+      emitsUnjoined: shared.emitsUnjoined,
+      emitsModelBinding: shared.emitsModelBinding,
+      unjoinedEmitTop: topOf(shared.unjoinedEmits, 20),
+      flowsGainedByJoin
     }
   }
 }
