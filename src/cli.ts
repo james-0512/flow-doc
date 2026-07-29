@@ -5,6 +5,8 @@ import { Command } from 'commander'
 import { loadConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
+import { defaultPackOptions, packFileName, packFlow, packOverview } from './pack.js'
+import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
 
 function printSummary(result: EntryScanResult, topDomains: number): void {
@@ -137,5 +139,65 @@ program
       console.log(`\n已寫入 ${path.resolve(opts.out)}`)
     }
   )
+
+program
+  .command('pack')
+  .description('階段四前置：把 chain 序列化成 LLM 可直接讀的生成封包')
+  .argument('[chains]', 'trace 產出的 JSON', 'flow-chains.json')
+  .option('-d, --out-dir <dir>', '輸出目錄', 'packets')
+  .option('--domain <name>', '只打包單一業務域')
+  .option('--flow <substr>', '只打包 entryId 含此字串的流程')
+  .option('--all', '連非流程（純查詢／UI 操作）也打包', false)
+  .option('--max-chars <n>', '單一封包的原始碼字元上限', String(defaultPackOptions.maxSourceChars))
+  .action(
+    (
+      chainsFile: string,
+      opts: { outDir: string; domain?: string; flow?: string; all: boolean; maxChars: string }
+    ) => {
+      if (!fs.existsSync(chainsFile)) {
+        console.error(`找不到 ${chainsFile}，請先執行 flow-doc trace`)
+        process.exitCode = 1
+        return
+      }
+      const result = JSON.parse(fs.readFileSync(chainsFile, 'utf8')) as TraceResult
+      let chains = result.chains.filter(c => c.root != null)
+      if (!opts.all) chains = chains.filter(c => c.isFlow)
+      if (opts.domain) chains = chains.filter(c => c.domain === opts.domain)
+      if (opts.flow) chains = chains.filter(c => c.entryId.includes(opts.flow!))
+
+      fs.mkdirSync(opts.outDir, { recursive: true })
+      const packOpts = { maxSourceChars: Number(opts.maxChars) }
+      let total = 0
+      for (const chain of chains) {
+        const md = packFlow(result.repoRoot, chain, packOpts)
+        if (!md) continue
+        fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
+        total += md.length
+      }
+      fs.writeFileSync(path.join(opts.outDir, '00-overview.md'), packOverview(result), 'utf8')
+
+      console.log(`\n已打包 ${chains.length} 條流程到 ${path.resolve(opts.outDir)}`)
+      console.log(`  總字元 ${total.toLocaleString()} · 平均 ${chains.length ? Math.round(total / chains.length).toLocaleString() : 0} 字元/流程`)
+      console.log(`  目錄檔：00-overview.md`)
+    }
+  )
+
+program
+  .command('verify')
+  .description('階段四後置：檢查生成的手冊沒有幻覺（引用的 file:line 必須真實且在封包範圍內）')
+  .argument('<manual>', '生成的手冊 Markdown')
+  .requiredOption('-r, --repo <path>', '目標 repo 路徑')
+  .option('-p, --packet <file>', '對應的流程封包，用來檢查引用是否超出提供範圍')
+  .action((manual: string, opts: { repo: string; packet?: string }) => {
+    const markdown = fs.readFileSync(manual, 'utf8')
+    const packet = opts.packet ? fs.readFileSync(opts.packet, 'utf8') : undefined
+    const result = verifyManual(markdown, path.resolve(opts.repo), packet)
+
+    console.log(`\n檢查 ${manual}`)
+    console.log(`  位置引用 ${result.references} 處 · 問題 ${result.violations.length} 處`)
+    for (const v of result.violations) console.log(`  ✗ [${v.kind}] ${v.reference} — ${v.detail}`)
+    if (result.violations.length === 0) console.log(`  全部通過`)
+    else process.exitCode = 1
+  })
 
 await program.parseAsync()

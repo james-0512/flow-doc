@@ -16,7 +16,7 @@ import type {
   TraceResult
 } from '../types.js'
 import { camelize } from '../load/registry.js'
-import { callsWithin, detectSink, isGuarded, toFunctionLike, type SinkContext } from './boundary.js'
+import { callsWithin, detectSink, isGuarded, normalizeExpr, toFunctionLike, type SinkContext } from './boundary.js'
 import { createAnalysisProgram, readSwaggerSource } from './program.js'
 import { indexSwaggerApi } from './swagger.js'
 
@@ -229,7 +229,13 @@ function dfs(
   /** 呼叫進來的路徑上是否已被某個 try 包住 */
   guardedCtx: boolean
 ): ChainNode {
-  const node: ChainNode = { name: nameOf(fn), loc: t.locOf(fn), effects: [], children: [] }
+  const node: ChainNode = {
+    name: nameOf(fn),
+    loc: t.locOf(fn),
+    endLine: fn.getEndLineNumber(),
+    effects: [],
+    children: []
+  }
   state.maxDepthSeen = Math.max(state.maxDepthSeen, depth)
 
   if (depth >= opts.maxDepth) {
@@ -252,7 +258,7 @@ function dfs(
       continue
     }
 
-    const exprText = call.getExpression().getText()
+    const exprText = normalizeExpr(call)
     if (
       NOISE_CALLS.has(exprText) ||
       NOISE_PREFIX.test(exprText) ||

@@ -17,6 +17,25 @@ const EMIT_CALL = /^(?:\$?emit|emits)$/
 const SIGNALR_CALL = /(?:connection|conn|hub|signalR)[\w.]*\.(invoke|send|on|off)$/i
 const BROADCAST_CALL = /\.postMessage$/
 
+/**
+ * 呼叫運算式的正規化文字。
+ *
+ * 這個 repo 大量使用鏈式寫法，`swaggerApiService.api` 與方法名常被 prettier 拆到
+ * 不同行：
+ *
+ * ```ts
+ * await swaggerApiService.api
+ *   .loginBindLineLogin(a, b)
+ *   .then(…)
+ * ```
+ *
+ * 不把空白收掉，所有跨行的 API 呼叫都會比對不到、然後解析進 generated code 被
+ * STOP 靜默跳過——手冊會少掉真實存在的 API 互動。
+ */
+export function normalizeExpr(call: CallExpression): string {
+  return call.getExpression().getText().replace(/\s+/g, '')
+}
+
 /** 第一個字串常數引數；拿不到（動態運算）回 null。 */
 function firstStringArg(call: CallExpression): string | null {
   const arg = call.getArguments()[0]
@@ -57,7 +76,7 @@ function navTarget(call: CallExpression): string {
  * 換不到準確度。Type Checker 留給真正需要它的地方——解析呼叫指向哪個定義。
  */
 export function detectSink(call: CallExpression, ctx: SinkContext): SideEffect | null {
-  const exprText = call.getExpression().getText()
+  const exprText = normalizeExpr(call)
   const loc = ctx.locOf(call)
   const guarded = isGuarded(call)
 

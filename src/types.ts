@@ -158,6 +158,8 @@ export interface AsyncLink {
 export interface ChainNode {
   name: string
   loc: SourceLoc
+  /** 函式主體的結束行。讓 pack 能直接從 JSON 取原始碼，不必重跑整個分析 */
+  endLine?: number
   effects: SideEffect[]
   children: ChainNode[]
   /** 本節點的 emit 接到哪些 parent handler。一個事件可能有多個 parent，全部列出不硬選 */

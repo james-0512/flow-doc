@@ -7,3 +7,4 @@ flow-entries.json
 flow-chains.json
 chains-*.json
 *.log
+packets/

@@ -68,6 +68,17 @@ describe('detectSink', () => {
     expect(plain?.guarded).toBe(false)
   })
 
+  it('跨行的鏈式呼叫也要認得', () => {
+    // prettier 會把 `swaggerApiService.api` 和方法名拆到不同行，這是此 repo 的
+    // 主流寫法；不收掉空白的話所有跨行 API 呼叫都會從手冊裡消失
+    const sink = sinkOf(`
+await swaggerApiService.api
+  .caseCreateCase({ a: 1 })
+  .then(res => res)
+`)
+    expect(sink).toMatchObject({ kind: 'HTTP_API', detail: 'POST /api/v1/case/create' })
+  })
+
   it('一般函式呼叫不是 sink', () => {
     expect(sinkOf(`doSomething(a, b)`)).toBeNull()
   })

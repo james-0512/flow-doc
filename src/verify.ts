@@ -1,0 +1,83 @@
+import fs from 'node:fs'
+import path from 'node:path'
+
+/** 行內程式碼形式的位置引用：`src/api/login.ts:19` 或 `src/x.vue:10-42` */
+const REFERENCE = /`([\w./@-]+\.(?:vue|ts|tsx|js|mjs)):(\d+)(?:-(\d+))?`/g
+
+export interface Violation {
+  kind: 'MISSING_FILE' | 'LINE_OUT_OF_RANGE' | 'NOT_IN_PACKET'
+  reference: string
+  detail: string
+}
+
+export interface VerifyResult {
+  references: number
+  violations: Violation[]
+}
+
+function collectReferences(markdown: string): { file: string; line: number; raw: string }[] {
+  const out: { file: string; line: number; raw: string }[] = []
+  for (const m of markdown.matchAll(REFERENCE)) {
+    out.push({ file: m[1]!, line: Number(m[2]), raw: m[0] })
+  }
+  return out
+}
+
+/**
+ * 驗證生成的手冊沒有幻覺。
+ *
+ * 兩層檢查，第二層才是真正有效的那層：
+ * 1. 檔案存在、行號在範圍內——擋掉憑空捏造的路徑
+ * 2. **引用必須出現在封包裡**——擋掉「檔案真的存在、行號也合法，但那一行根本
+ *    不在這條流程上」的幻覺。這是純檔案檢查抓不到、卻最容易發生的一種
+ */
+export function verifyManual(markdown: string, repoRoot: string, packet?: string): VerifyResult {
+  const refs = collectReferences(markdown)
+  const violations: Violation[] = []
+
+  const packetRefs = packet
+    ? new Set(collectReferences(packet).map(r => `${r.file}:${r.line}`))
+    : null
+  // 封包的原始碼區塊標了 `file:start-end`，手冊引用區間內任一行都算合法
+  const packetRanges = packet
+    ? [...packet.matchAll(REFERENCE)]
+        .filter(m => m[3])
+        .map(m => ({ file: m[1]!, start: Number(m[2]), end: Number(m[3]) }))
+    : []
+
+  const lineCounts = new Map<string, number>()
+
+  for (const ref of refs) {
+    const abs = path.join(repoRoot, ref.file)
+    if (!fs.existsSync(abs)) {
+      violations.push({ kind: 'MISSING_FILE', reference: ref.raw, detail: `檔案不存在：${ref.file}` })
+      continue
+    }
+    let count = lineCounts.get(ref.file)
+    if (count == null) {
+      count = fs.readFileSync(abs, 'utf8').split('\n').length
+      lineCounts.set(ref.file, count)
+    }
+    if (ref.line < 1 || ref.line > count) {
+      violations.push({
+        kind: 'LINE_OUT_OF_RANGE',
+        reference: ref.raw,
+        detail: `${ref.file} 只有 ${count} 行`
+      })
+      continue
+    }
+    if (packetRefs) {
+      const exact = packetRefs.has(`${ref.file}:${ref.line}`)
+      const inRange = packetRanges.some(r => r.file === ref.file && ref.line >= r.start && ref.line <= r.end)
+      if (!exact && !inRange) {
+        violations.push({
+          kind: 'NOT_IN_PACKET',
+          reference: ref.raw,
+          detail: '此位置不在封包提供的範圍內，可能是臆測'
+        })
+      }
+    }
+  }
+
+  return { references: refs.length, violations }
+}
