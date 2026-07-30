@@ -233,7 +233,9 @@ export function buildSite(
   limitations: string | undefined,
   opts: SiteOptions = defaultSiteOptions,
   /** 檔名直接對應的流程（其餘是被 `covers:` 帶進來的） */
-  manualPrimaries: ReadonlySet<string> = new Set()
+  manualPrimaries: ReadonlySet<string> = new Set(),
+  /** 全域前置總覽（`crosscut-overview.md`）——跨封包的綜合敘述，注入全域前置 index 頁 */
+  crosscutOverview?: string
 ): SitePage[] {
   const pages: SitePage[] = []
   const flows = result.chains.filter(c => c.isFlow)
@@ -271,6 +273,10 @@ export function buildSite(
   // 全域前置索引
   if (result.crosscut.length > 0) {
     const md = ['# 全域前置', '', '每一條業務流程都會經過以下處理。各流程頁面不重複展開這一段。', '']
+    if (crosscutOverview) {
+      // 總覽與單頁的「流程敘述」同屬人／LLM 寫的信任層級；檔內若有 H1 去掉，頁面已有 H1
+      md.push(crosscutOverview.trim().replace(/^#\s+.+\n+/, ''), '', '## 各流程', '')
+    }
     for (const c of result.crosscut) {
       // 有敘述時用敘述的標題，並保留原始 label 當副標——讀者要能對回程式碼裡的名字
       const manual = manuals.get(c.entryId)
