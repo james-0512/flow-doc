@@ -439,10 +439,34 @@ function traceCrosscut(t: Tracer, shared: SharedCounters, opts: TraceOptions): F
   const out: FlowChain[] = []
 
   for (const spec of t.config.crosscut) {
+    const roots: { fn: Node; label: string }[] = []
+
+    if (spec.symbolPattern) {
+      // 目錄模式：掃出所有符合的匯出工廠，各自成一章
+      const re = new RegExp(spec.symbolPattern)
+      const prefix = spec.file.endsWith('/') ? spec.file : `${spec.file}/`
+      for (const rel of [...t.project.getSourceFiles()]
+        .map(f => path.relative(t.config.repoRoot, f.getFilePath()).split(path.sep).join('/'))
+        .filter(r => r.startsWith(prefix))
+        .sort()) {
+        const sf = sourceFileFor(t, rel)
+        if (!sf) continue
+        for (const decl of sf.getFunctions()) {
+          const name = decl.getName()
+          if (!name || !decl.isExported() || !re.test(name)) continue
+          const fn = spec.unwrapReturn ? returnedFunctionOf(decl) : decl
+          if (fn) roots.push({ fn, label: `${spec.label} — ${name.replace(/^create|Guard$/g, '')}` })
+        }
+      }
+      for (const [i, { fn, label }] of roots.entries()) {
+        out.push(buildCrosscutChain(t, shared, opts, spec.file, i, fn, label))
+      }
+      continue
+    }
+
     const sf = sourceFileFor(t, spec.file)
     if (!sf) continue
 
-    const roots: { fn: Node; label: string }[] = []
     if (spec.symbol) {
       const fn = resolveNamedHandler(t, spec.file, spec.symbol)
       if (fn) roots.push({ fn, label: spec.label })
@@ -461,32 +485,56 @@ function traceCrosscut(t: Tracer, shared: SharedCounters, opts: TraceOptions): F
     }
 
     for (const [i, { fn, label }] of roots.entries()) {
-      const state = newDfsState(opts, shared)
-      state.visited.add(keyOf(fn))
-      state.expanded.add(keyOf(fn))
-      const root = dfs(t, fn, 0, state, opts, false)
-      const agg = { effects: [] as SideEffect[], count: 0 }
-      flatten(root, agg, true)
-      const effects = dedupeEffects(agg.effects)
-      out.push({
-        entryId: `crosscut:${spec.file}#${i}`,
-        domain: '全域前置',
-        label,
-        trigger: label,
-        entryKind: 'CROSSCUT',
-        entryLoc: t.locOf(fn),
-        root,
-        effects,
-        nodeCount: agg.count,
-        maxDepth: state.maxDepthSeen,
-        flowKind: classifyFlow(effects),
-        isFlow: true,
-        unresolvedCalls: state.unresolved
-      })
+      out.push(buildCrosscutChain(t, shared, opts, spec.file, i, fn, label))
     }
   }
 
   return out
+}
+
+/** 工廠函式 `return` 出來的那個函式——真正會被框架呼叫的東西。 */
+function returnedFunctionOf(decl: Node): Node | null {
+  const body = Node.isFunctionDeclaration(decl) ? decl.getBody() : undefined
+  if (!body) return null
+  for (const stmt of body.getDescendantsOfKind(SyntaxKind.ReturnStatement)) {
+    const expr = stmt.getExpression()
+    const fn = expr ? toFunctionLike(expr) : null
+    if (fn) return fn
+  }
+  return null
+}
+
+function buildCrosscutChain(
+  t: Tracer,
+  shared: SharedCounters,
+  opts: TraceOptions,
+  file: string,
+  index: number,
+  fn: Node,
+  label: string
+): FlowChain {
+  const state = newDfsState(opts, shared)
+  state.visited.add(keyOf(fn))
+  state.expanded.add(keyOf(fn))
+  const root = dfs(t, fn, 0, state, opts, false)
+  const agg = { effects: [] as SideEffect[], count: 0 }
+  flatten(root, agg, true)
+  const effects = dedupeEffects(agg.effects)
+  return {
+    entryId: `crosscut:${file}#${index}`,
+    domain: '全域前置',
+    label,
+    trigger: label,
+    entryKind: 'CROSSCUT',
+    entryLoc: t.locOf(fn),
+    root,
+    effects,
+    nodeCount: agg.count,
+    maxDepth: state.maxDepthSeen,
+    flowKind: classifyFlow(effects),
+    isFlow: true,
+    unresolvedCalls: state.unresolved
+  }
 }
 
 function dedupeEffects(effects: SideEffect[]): SideEffect[] {

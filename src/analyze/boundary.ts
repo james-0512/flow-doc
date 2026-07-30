@@ -16,6 +16,17 @@ const EMIT_CALL = /^(?:\$?emit|emits)$/
 /** SignalR 的 hub 呼叫。物件名在此專案穩定為 connection / conn / hub / signalR。 */
 const SIGNALR_CALL = /(?:connection|conn|hub|signalR)[\w.]*\.(invoke|send|on|off)$/i
 const BROADCAST_CALL = /\.postMessage$/
+/**
+ * Pinia store 的取得：`useAuthStore()`。
+ *
+ * 這是**取得 handle**，不是業務步驟。追進去會執行整個 defineStore setup，
+ * 把 store 初始化時連帶建立的東西（其他 store、composable、SignalR 連線）
+ * 全掛在呼叫者頭上——實測讓「權限守衛」憑空多出代理登出 API 與導頁。
+ *
+ * store 的 action 該在被明確呼叫時計入（`authStore.loginHandler()` 會由
+ * Type Checker 直接解析到 action 本身），與這裡無關。
+ */
+const PINIA_STORE_GETTER = /(?:^|\.)use[A-Z]\w*Store$/
 
 /**
  * 呼叫運算式的正規化文字。
@@ -134,6 +145,10 @@ export function detectSink(call: CallExpression, ctx: SinkContext): SideEffect |
     return { kind: 'BROADCAST', detail: exprText, mutating: false, loc, guarded }
   }
 
+  if (PINIA_STORE_GETTER.test(exprText)) {
+    return { kind: 'STORE', detail: `取得 ${exprText.replace(/^use|Store$/g, '')} store`, mutating: false, loc, guarded }
+  }
+
   return null
 }
 
@@ -188,13 +203,51 @@ export function toFunctionLike(node: Node, depth = 0): Node | null {
   return null
 }
 
-/** 取函式主體內的所有呼叫，含巢狀箭頭函式（`.then(() => …)` 也是流程的一部分）。 */
+/**
+ * 這個函式是「被當成引數傳進去、因而會被呼叫」的回呼嗎？
+ *
+ * `.then(() => …)`、`onMounted(() => …)`、`defineStore('x', () => …)` 的回呼都會執行，
+ * 所以裡面的呼叫屬於流程的一部分。反之 `const foo = () => …` 或巢狀的
+ * `function bar() {…}` 只是**定義**，不執行。
+ */
+function isInvokedInPlace(fn: Node): boolean {
+  const parent = fn.getParent()
+  if (!parent) return false
+  if (Node.isCallExpression(parent)) {
+    // 當引數（回呼）或當被呼叫者（IIFE）都算會執行
+    return parent.getArguments().some(a => a === fn) || parent.getExpression() === fn
+  }
+  // (() => {…})() 這種被括號包住的 IIFE
+  if (Node.isParenthesizedExpression(parent)) return isInvokedInPlace(parent)
+  return false
+}
+
+/**
+ * 取函式主體內**實際會執行到**的呼叫。
+ *
+ * 關鍵在於不能無腦抓 descendants：Pinia store 的 setup 函式裡宣告了一堆 action，
+ * 但 `useAuthStore()` 只是取得 store、不會執行它們。無腦抓的話，路由守衛的副作用
+ * 會憑空多出 `POST /api/v1/login`、`POST /api/v1/logout`——照那份資料寫出來的手冊
+ * 會宣稱「進入頁面時系統呼叫了登入 API」，是完全錯誤的結論。
+ *
+ * 巢狀函式只有在「當場被呼叫」時才往裡面看；若只是被定義，它的呼叫要等到有人
+ * 真的呼叫它、由 resolveCallTarget 追進去時才計入。
+ */
 export function callsWithin(fn: Node): CallExpression[] {
-  const body = Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn) || Node.isFunctionExpression(fn)
-    ? fn.getBody()
-    : Node.isArrowFunction(fn)
+  const body =
+    Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn) || Node.isFunctionExpression(fn)
       ? fn.getBody()
-      : undefined
+      : Node.isArrowFunction(fn)
+        ? fn.getBody()
+        : undefined
   if (!body) return []
-  return body.getDescendantsOfKind(SyntaxKind.CallExpression)
+
+  const out: CallExpression[] = []
+  const visit = (node: Node): void => {
+    if (isFunctionLike(node) && !isInvokedInPlace(node)) return
+    if (Node.isCallExpression(node)) out.push(node)
+    node.forEachChild(visit)
+  }
+  body.forEachChild(visit)
+  return out
 }

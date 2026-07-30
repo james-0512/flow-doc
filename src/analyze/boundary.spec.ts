@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Node, Project, SyntaxKind } from 'ts-morph'
 import type { CallExpression } from 'ts-morph'
-import { detectSink, toFunctionLike, type SinkContext } from './boundary.js'
+import { callsWithin, detectSink, toFunctionLike, type SinkContext } from './boundary.js'
 import type { SwaggerEndpoint } from './swagger.js'
 
 const swagger = new Map<string, SwaggerEndpoint>([
@@ -79,8 +79,57 @@ await swaggerApiService.api
     expect(sink).toMatchObject({ kind: 'HTTP_API', detail: 'POST /api/v1/case/create' })
   })
 
+  it('取得 Pinia store 是邊界，不往下追', () => {
+    // useAuthStore() 只是取 handle。追進去會執行整個 defineStore setup，
+    // 把 store 初始化連帶建立的東西全掛在呼叫者頭上——實測讓「權限守衛」
+    // 憑空多出代理登出 API 與導頁
+    expect(sinkOf(`const s = useAuthStore()`)).toMatchObject({ kind: 'STORE', detail: '取得 Auth store' })
+    // 但 action 的呼叫不受影響，它會由 Type Checker 直接解析到 action 本身
+    expect(sinkOf(`authStore.loginHandler(data)`)).toBeNull()
+  })
+
   it('一般函式呼叫不是 sink', () => {
     expect(sinkOf(`doSomething(a, b)`)).toBeNull()
+  })
+})
+
+describe('callsWithin', () => {
+  function bodyOf(code: string, name: string) {
+    const sf = new Project({ useInMemoryFileSystem: true }).createSourceFile('t.ts', code)
+    const decl = sf.getVariableDeclaration(name) ?? sf.getFunction(name)!
+    return toFunctionLike(decl)!
+  }
+
+  it('只被定義、沒被呼叫的巢狀函式不算執行到', () => {
+    // Pinia store 的 setup 就是這個形狀：useAuthStore() 只是取得 store，
+    // 不會執行 login()。無腦抓 descendants 會讓守衛的副作用憑空多出登入 API
+    const fn = bodyOf(
+      `const useStore = () => {
+         function login() { apiService.post('/api/v1/login', d) }
+         const logout = () => { apiService.post('/api/v1/logout') }
+         init()
+         return { login, logout }
+       }`,
+      'useStore'
+    )
+    expect(callsWithin(fn).map(c => c.getExpression().getText())).toEqual(['init'])
+  })
+
+  it('當場被呼叫的回呼要算進去', () => {
+    const fn = bodyOf(
+      `const run = async () => {
+         await load().then(() => save())
+       }`,
+      'run'
+    )
+    const names = callsWithin(fn).map(c => c.getExpression().getText().replace(/\s+/g, ''))
+    expect(names).toContain('save')
+    expect(names).toContain('load')
+  })
+
+  it('IIFE 也算當場執行', () => {
+    const fn = bodyOf(`const f = () => { (() => { boom() })() }`, 'f')
+    expect(callsWithin(fn).map(c => c.getExpression().getText())).toContain('boom')
   })
 })
 

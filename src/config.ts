@@ -23,9 +23,21 @@ export interface AnalyzerConfig {
   aliases: Record<string, string>
   /**
    * 橫切邏輯的入口。每條業務流程都會經過這些，但不該在每條流程裡重複展開。
-   * `symbol` 省略時自動尋找該檔的 axios interceptor 註冊。
+   *
+   * - `file` 可以是單檔或目錄
+   * - `symbol` 指定單一函式；`symbolPattern` 用正則比對目錄下的匯出函式
+   * - 兩者都省略時，自動尋找該檔的 axios interceptor 註冊
+   * - `unwrapReturn`：追「被 return 出來的函式」而非工廠本身。路由守衛是
+   *   `createXxxGuard(deps)` 回傳閉包的形狀，閉包由 vue-router 稍後呼叫，
+   *   不追進去的話整條守衛邏輯都是空的
    */
-  crosscut: { file: string; symbol?: string; label: string }[]
+  crosscut: {
+    file: string
+    symbol?: string
+    symbolPattern?: string
+    unwrapReturn?: boolean
+    label: string
+  }[]
   /** 掃描時排除的 glob（相對 repo 根） */
   exclude: string[]
 }
@@ -62,7 +74,12 @@ export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
     routerDir: 'src/router',
     aliases: { '@/': 'src/', '@config/': '' },
     crosscut: [
-      { file: 'src/router/guards/index.ts', symbol: 'buildGuards', label: '路由守衛管線' },
+      {
+        file: 'src/router/guards',
+        symbolPattern: '^create[A-Za-z]+Guard$',
+        unwrapReturn: true,
+        label: '路由守衛'
+      },
       { file: 'src/utils/service/api.service.ts', label: 'API 請求／回應攔截器' }
     ],
     exclude: [
