@@ -5,7 +5,7 @@ import { Command } from 'commander'
 import { loadConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
-import { defaultPackOptions, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
+import { defaultPackOptions, findPeers, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
 import { buildSite, defaultSiteOptions, slugify } from './site.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
@@ -93,6 +93,20 @@ function printTraceSummary(result: TraceResult): void {
     console.log(`\n無法起鏈的 handler：`)
     for (const { name, count } of stats.unresolvedHandlerTop.slice(0, 10)) console.log(`  ${String(count).padStart(5)}  ${name}`)
   }
+}
+
+/**
+ * 取出手冊 frontmatter 裡的 `covers:` 清單。
+ *
+ * 用意是讓一份敘述明確涵蓋多個觸發點（篩選、分頁、查詢鈕往往是同一個業務動作），
+ * 而不是靠副作用相同就自動合併——核准與駁回也可能打同一支 API。
+ */
+function parseCovers(markdown: string): string[] {
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(markdown)
+  if (!frontmatter) return []
+  const block = /(?:^|\n)covers:\s*\n((?:\s*-\s*.+\n?)+)/.exec(frontmatter[1]!)
+  if (!block) return []
+  return [...block[1]!.matchAll(/^\s*-\s*(.+?)\s*$/gm)].map(m => m[1]!)
 }
 
 const program = new Command()
@@ -203,8 +217,9 @@ program
           total += md.length
         }
       }
+      const peers = findPeers([...groups.keys()])
       for (const [chain, siblings] of groups) {
-        const md = packFlow(result.repoRoot, chain, packOpts, siblings)
+        const md = packFlow(result.repoRoot, chain, packOpts, siblings, peers.get(chain) ?? [])
         if (!md) continue
         fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
         total += md.length
@@ -250,15 +265,27 @@ program
 
       // 手冊敘述以 entryId 的 slug 命名，有幾條放幾條
       const manuals = new Map<string, string>()
+      const primaries = new Set<string>()
       if (opts.manuals && fs.existsSync(opts.manuals)) {
         const byslug = new Map<string, string>()
+        const byCovers = new Map<string, string>()
         for (const f of fs.readdirSync(opts.manuals)) {
-          if (f.endsWith('.md')) byslug.set(f.replace(/\.md$/, ''), fs.readFileSync(path.join(opts.manuals, f), 'utf8'))
+          if (!f.endsWith('.md')) continue
+          const md = fs.readFileSync(path.join(opts.manuals, f), 'utf8')
+          byslug.set(f.replace(/\.md$/, ''), md)
+          // 一份敘述可用 frontmatter 的 covers: 明確宣告它涵蓋哪些流程。
+          // 副作用相同的多個控件（篩選、分頁、查詢鈕）其實是同一件事，
+          // 但不該靠猜——由作者宣告，可稽核。
+          for (const id of parseCovers(md)) byCovers.set(id, md)
         }
         const all = [...result.crosscut, ...result.chains]
         for (const c of all) {
-          const hit = byslug.get(slugify(c.entryId))
-          if (hit) manuals.set(c.entryId, hit)
+          const direct = byslug.get(slugify(c.entryId))
+          const hit = direct ?? byCovers.get(c.entryId)
+          if (!hit) continue
+          manuals.set(c.entryId, hit)
+          // 檔名直接對應的流程是這份敘述的代表，索引與側邊欄會連到它
+          if (direct) primaries.add(c.entryId)
         }
         // 一份敘述涵蓋整組共用 handler 的觸發點（pack 也是依此合併的），
         // 否則同一條程式碼路徑的其他觸發鈕會顯示成「尚未撰寫」
@@ -275,10 +302,13 @@ program
       }
 
       const limitations = fs.existsSync(opts.limitations) ? fs.readFileSync(opts.limitations, 'utf8') : undefined
-      const pages = buildSite(result, manuals, limitations, {
-        title: opts.title,
-        sourceBaseUrl: opts.sourceBase
-      })
+      const pages = buildSite(
+        result,
+        manuals,
+        limitations,
+        { title: opts.title, sourceBaseUrl: opts.sourceBase },
+        primaries
+      )
 
       fs.rmSync(path.join(opts.outDir, 'flows'), { recursive: true, force: true })
       for (const page of pages) {

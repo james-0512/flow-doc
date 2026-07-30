@@ -125,7 +125,14 @@ export function packFlow(
   chain: FlowChain,
   opts: PackOptions = defaultPackOptions,
   /** 共用同一個 handler 的其他觸發點。同一條程式碼路徑只寫一次敘述 */
-  siblings: FlowChain[] = []
+  siblings: FlowChain[] = [],
+  /**
+   * 同檔案、副作用組合完全相同，但 handler 不同的其他流程。
+   *
+   * 刻意**不自動合併**：核准與駁回可能打同一支 API、副作用簽章一模一樣，
+   * 自動合併會把兩個相反的動作寫成一件事。改成提示作者自行判斷。
+   */
+  peers: FlowChain[] = []
 ): string {
   if (!chain.root) return ''
 
@@ -174,6 +181,24 @@ export function packFlow(
     for (const s of siblings) {
       md.push(`  - ${s.tag ? `\`${s.tag}\` ` : ''}\`@${s.trigger}\`  \`${s.entryLoc.file}:${s.entryLoc.line}\``)
     }
+  }
+  if (peers.length > 0) {
+    md.push('')
+    md.push(
+      `> **同檔案內另有 ${peers.length} 個觸發點的副作用組合與本流程完全相同**，` +
+        `很可能是同一個業務動作的不同控件（例如篩選條件、分頁、查詢鈕都呼叫同一支查詢）。`
+    )
+    md.push('>')
+    md.push('> 判斷是同一件事的話，只寫一份敘述，並在 frontmatter 用 `covers:` 宣告涵蓋範圍：')
+    md.push('>')
+    md.push('> ```yaml')
+    md.push('> ---')
+    md.push('> covers:')
+    for (const p of peers) md.push(`>   - ${p.entryId}`)
+    md.push('> ---')
+    md.push('> ```')
+    md.push('>')
+    md.push('> 若其實是不同動作（例如核准與駁回打同一支 API），就各寫一份，不要用 `covers`。')
   }
   md.push(`- 節點數 ${chain.nodeCount} · 最大深度 ${chain.maxDepth}`)
   if (chain.unresolvedCalls > 0) {
@@ -330,6 +355,36 @@ export function groupByHandler(chains: FlowChain[]): Map<FlowChain, FlowChain[]>
         a.entryId.localeCompare(b.entryId)
     )
     out.set(sorted[0]!, sorted.slice(1))
+  }
+  return out
+}
+
+/** 副作用組合的指紋，用來找出「很可能是同一件事」的流程。 */
+export function effectSignature(chain: FlowChain): string {
+  return chain.effects
+    .map(e => `${e.kind}:${e.detail}`)
+    .sort()
+    .join('|')
+}
+
+/**
+ * 找出同檔案、副作用組合完全相同的其他代表流程。
+ * 只提示、不合併——理由見 packFlow 的 peers 參數說明。
+ */
+export function findPeers(representatives: FlowChain[]): Map<FlowChain, FlowChain[]> {
+  const buckets = new Map<string, FlowChain[]>()
+  for (const c of representatives) {
+    const sig = effectSignature(c)
+    if (!sig) continue
+    const key = `${c.entryLoc.file}|${sig}`
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(c)
+    else buckets.set(key, [c])
+  }
+  const out = new Map<FlowChain, FlowChain[]>()
+  for (const group of buckets.values()) {
+    if (group.length < 2) continue
+    for (const c of group) out.set(c, group.filter(o => o !== c))
   }
   return out
 }

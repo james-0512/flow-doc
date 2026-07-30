@@ -194,11 +194,46 @@ export interface SitePage {
  * 都能對回原始碼；人寫的敘述有幾條就顯示幾條，逐步補齊。這樣站台不必等 902 條
  * 手冊全部生成才有價值。
  */
+/**
+ * 把共用同一份敘述的流程收成一筆索引項目。
+ *
+ * 一份用 `covers:` 涵蓋 9 個控件的敘述，在頁面層級是對的（每個控件都看得到敘述），
+ * 但索引若逐條列出，會變成連續 9 個一模一樣的標題。索引要的是「一個業務動作一筆」。
+ *
+ * @param primaries 檔名直接對應的流程，優先當代表；其餘是被 `covers:` 帶進來的
+ */
+function collapseByManual(
+  flows: FlowChain[],
+  manuals: ReadonlyMap<string, string>,
+  primaries: ReadonlySet<string>
+): { chain: FlowChain; triggerCount: number }[] {
+  const groups = new Map<string, FlowChain[]>()
+  const order: string[] = []
+  for (const c of flows) {
+    const manual = manuals.get(c.entryId)
+    // 沒有敘述的流程各自成組，不能靠標題合併——它們的標題本來就不同
+    const key = manual ? `manual:${manual.length}:${manual.slice(0, 200)}` : `flow:${c.entryId}`
+    const bucket = groups.get(key)
+    if (bucket) bucket.push(c)
+    else {
+      groups.set(key, [c])
+      order.push(key)
+    }
+  }
+  return order.map(key => {
+    const group = groups.get(key)!
+    const chain = group.find(c => primaries.has(c.entryId)) ?? group[0]!
+    return { chain, triggerCount: group.length }
+  })
+}
+
 export function buildSite(
   result: TraceResult,
   manuals: ReadonlyMap<string, string>,
   limitations: string | undefined,
-  opts: SiteOptions = defaultSiteOptions
+  opts: SiteOptions = defaultSiteOptions,
+  /** 檔名直接對應的流程（其餘是被 `covers:` 帶進來的） */
+  manualPrimaries: ReadonlySet<string> = new Set()
 ): SitePage[] {
   const pages: SitePage[] = []
   const flows = result.chains.filter(c => c.isFlow)
@@ -222,9 +257,10 @@ export function buildSite(
     for (const [title, group] of [['寫入型流程', w], ['查詢型流程', r]] as const) {
       if (group.length === 0) continue
       md.push(`## ${title}`, '')
-      for (const c of group) {
+      for (const { chain: c, triggerCount } of collapseByManual(group, manuals, manualPrimaries)) {
         const apis = c.effects.filter(e => e.kind === 'HTTP_API').map(e => `\`${e.detail}\``)
-        md.push(`- [${flowTitle(c, manuals.get(c.entryId))}](./${slugify(c.entryId)}.md)`)
+        const triggers = triggerCount > 1 ? `　<small>${triggerCount} 個觸發點</small>` : ''
+        md.push(`- [${flowTitle(c, manuals.get(c.entryId))}](./${slugify(c.entryId)}.md)${triggers}`)
         if (apis.length > 0) md.push(`  <br><small>${apis.join('、')}</small>`)
       }
       md.push('')
@@ -318,7 +354,10 @@ export function buildSite(
 
   if (limitations) pages.push({ file: 'limitations.md', content: limitations })
 
-  pages.push({ file: '.vitepress/config.mts', content: renderConfig(result, domains, manuals, opts) })
+  pages.push({
+    file: '.vitepress/config.mts',
+    content: renderConfig(result, domains, manuals, manualPrimaries, opts)
+  })
 
   // 站台自帶 package.json，與分析器的依賴完全分離。
   // 兩者放在一起會出事：vitepress 綁 vite 5、vitest 需要 vite 6+，裝在同一個
@@ -370,6 +409,7 @@ function renderConfig(
   result: TraceResult,
   domains: [string, FlowChain[]][],
   manuals: ReadonlyMap<string, string>,
+  manualPrimaries: ReadonlySet<string>,
   opts: SiteOptions
 ): string {
   const sidebar = [
@@ -393,14 +433,17 @@ function renderConfig(
           }
         ]
       : []),
-    ...domains.map(([domain, list]) => ({
-      text: `${domain}（${list.length}）`,
-      collapsed: true,
-      items: list.map(c => ({
-        text: flowTitle(c, manuals.get(c.entryId)),
-        link: `/flows/${slugify(domain)}/${slugify(c.entryId)}`
-      }))
-    }))
+    ...domains.map(([domain, list]) => {
+      const collapsed = collapseByManual(list, manuals, manualPrimaries)
+      return {
+        text: `${domain}（${collapsed.length}）`,
+        collapsed: true,
+        items: collapsed.map(({ chain: c, triggerCount }) => ({
+          text: flowTitle(c, manuals.get(c.entryId)) + (triggerCount > 1 ? `（${triggerCount}）` : ''),
+          link: `/flows/${slugify(domain)}/${slugify(c.entryId)}`
+        }))
+      }
+    })
   ]
 
   // withMermaid 而非 defineConfig：plan.md 要求每條流程附序列圖，

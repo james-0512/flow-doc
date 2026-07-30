@@ -71,6 +71,28 @@ describe('verifyManual', () => {
     expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, fresh).violations).toEqual([])
   })
 
+  it('手冊宣告 covers 的觸發位置算合法引用', () => {
+    // 一份敘述涵蓋多個控件（篩選、分頁、查詢鈕）是正確寫法，引用那些控件的位置
+    // 不該被當成臆測——covers: 就是作者的明確宣告
+    const packet = '- **createDemo** `src/api/demo.ts:3-5`'
+    const manual = [
+      '---',
+      'covers:',
+      '  - src/api/demo.ts:8:UtilButton:click',
+      '---',
+      '',
+      '另一個觸發點在 `src/api/demo.ts:8`。'
+    ].join('\n')
+    expect(verifyManual(manual, REPO, packet).violations).toEqual([])
+  })
+
+  it('沒宣告 covers 時仍會抓到封包外的引用', () => {
+    const packet = '- **createDemo** `src/api/demo.ts:3-5`'
+    expect(verifyManual('另一個位置 `src/api/demo.ts:8`。', REPO, packet).violations).toMatchObject([
+      { kind: 'NOT_IN_PACKET' }
+    ])
+  })
+
   it('封包給的是區間時，區間內任一行都算合法引用', () => {
     const packet = '- **createDemo** `src/api/demo.ts:3-5`'
     expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, packet).violations).toEqual([])

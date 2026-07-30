@@ -13,6 +13,25 @@ export interface Violation {
 /** 封包的原始碼區塊：`### \`name\` — \`file:start-end\`` 後面接一個 fenced block */
 const PACKET_EXCERPT = /^### `(.+?)` — `([\w./@-]+):(\d+)-(\d+)`\s*$\n+```ts\n([\s\S]*?)\n```/gm
 
+/** frontmatter 的 `covers:` 清單，內容是 entryId（`file:line:tag:event`） */
+const COVERS_ENTRY = /^\s*-\s*([\w./@-]+):(\d+):/gm
+
+/**
+ * 手冊自己宣告涵蓋的流程觸發位置。
+ *
+ * 一份敘述用 `covers:` 宣告它涵蓋哪些觸發點時，引用那些觸發點的位置是正當的——
+ * 那正是宣告的意思。不認這件事會讓「一份敘述涵蓋多個控件」的正確寫法被誤判成臆測。
+ */
+function declaredCoverLocations(markdown: string): Set<string> {
+  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(markdown)
+  const out = new Set<string>()
+  if (!frontmatter) return out
+  const block = /(?:^|\n)covers:\s*\n((?:\s*-\s*.+\n?)+)/.exec(frontmatter[1]!)
+  if (!block) return out
+  for (const m of block[1]!.matchAll(COVERS_ENTRY)) out.add(`${m[1]}:${m[2]}`)
+  return out
+}
+
 /** 封包裡標成寫入的副作用行，例如 `- [API] POST /x（**寫入**）  \`src/a.ts:19\`` */
 const MUTATING_EFFECT = /^- \[[^\]]+\] (.+?)（\*\*寫入\*\*.*?`([\w./@-]+):(\d+)`\s*$/gm
 
@@ -51,6 +70,7 @@ export function verifyManual(markdown: string, repoRoot: string, packet?: string
         .map(m => ({ file: m[1]!, start: Number(m[2]), end: Number(m[3]) }))
     : []
 
+  const covered = declaredCoverLocations(markdown)
   const lineCounts = new Map<string, number>()
 
   for (const ref of refs) {
@@ -73,7 +93,8 @@ export function verifyManual(markdown: string, repoRoot: string, packet?: string
       continue
     }
     if (packetRefs) {
-      const exact = packetRefs.has(`${ref.file}:${ref.line}`)
+      const key = `${ref.file}:${ref.line}`
+      const exact = packetRefs.has(key) || covered.has(key)
       const inRange = packetRanges.some(r => r.file === ref.file && ref.line >= r.start && ref.line <= r.end)
       if (!exact && !inRange) {
         violations.push({

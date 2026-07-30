@@ -8,6 +8,17 @@ export interface SinkContext {
   locOf: (node: Node) => SourceLoc
 }
 
+/**
+ * 用非 GET 方法實作的查詢端點。
+ *
+ * 「method !== GET 就是寫入」對這些是錯的：複雜查詢條件放不進 query string 時，
+ * 後端常用 POST 收 body——`POST /api/v1/verificationLog/list` 就是查詢，不是寫入。
+ * 誤判會讓純篩選的流程被標成「會改變資料」，那是手冊裡最不該弄錯的一件事。
+ *
+ * 目標專案 288 個非 GET 端點中有 7 個屬於此類，已逐一確認過路徑語意。
+ */
+const QUERY_LIKE_PATH = /\/(list|search|query|select|count|export|menu|options|check|validate|preview)(\/|$)/i
+
 const SWAGGER_CALL = /swaggerApiService\.api\.(\w+)$/
 const AXIOS_CALL = /(?:^|\.)apiService\.(get|post|put|patch|delete)$/
 const ROUTER_NAV = /(?:^|\.)\$?router\.(push|replace)$/
@@ -64,6 +75,12 @@ export function isGuarded(call: CallExpression): boolean {
   return false
 }
 
+/** 這個端點會改變資料嗎？非 GET 但路徑語意是查詢的要排除。 */
+function isMutatingEndpoint(method: string, url: string): boolean {
+  if (method === 'GET') return false
+  return !QUERY_LIKE_PATH.test(url)
+}
+
 /** `router.push({ name: 'X' })` / `router.push('/x')` 的目標描述。 */
 function navTarget(call: CallExpression): string {
   const literal = firstStringArg(call)
@@ -98,7 +115,7 @@ export function detectSink(call: CallExpression, ctx: SinkContext): SideEffect |
       kind: 'HTTP_API',
       detail: ep ? `${ep.method} ${ep.url}` : swaggerMatch[1]!,
       // 索引不到時保守視為 mutating，寧可多收一條流程也不要漏
-      mutating: ep ? ep.method !== 'GET' : true,
+      mutating: ep ? isMutatingEndpoint(ep.method, ep.url) : true,
       note: ep?.summary,
       loc,
       guarded
@@ -108,10 +125,12 @@ export function detectSink(call: CallExpression, ctx: SinkContext): SideEffect |
   const axiosMatch = AXIOS_CALL.exec(exprText)
   if (axiosMatch) {
     const method = axiosMatch[1]!.toUpperCase()
+    const url = firstStringArg(call)
     return {
       kind: 'HTTP_API',
-      detail: `${method} ${firstStringArg(call) ?? '(動態 URL)'}`,
-      mutating: method !== 'GET',
+      detail: `${method} ${url ?? '(動態 URL)'}`,
+      // URL 拿不到時保守視為寫入
+      mutating: url ? isMutatingEndpoint(method, url) : method !== 'GET',
       loc,
       guarded
     }
