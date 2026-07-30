@@ -213,7 +213,10 @@ export function toFunctionLike(node: Node, depth = 0): Node | null {
 function isInvokedInPlace(fn: Node): boolean {
   const parent = fn.getParent()
   if (!parent) return false
-  if (Node.isCallExpression(parent)) {
+  // NewExpression 一定要一起收：`new Promise((resolve, reject) => …)` 的 executor
+  // 會被建構子立刻執行，而這是包裝非同步流程最常見的寫法。漏掉它會讓
+  // `loginHandler` 裡的 API 呼叫整個消失。
+  if (Node.isCallExpression(parent) || Node.isNewExpression(parent)) {
     // 當引數（回呼）或當被呼叫者（IIFE）都算會執行
     return parent.getArguments().some(a => a === fn) || parent.getExpression() === fn
   }

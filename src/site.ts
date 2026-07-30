@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { slugify } from './paths.js'
 import type { AsyncLink, ChainNode, FlowChain, SideEffect, TraceResult } from './types.js'
 
 export interface SiteOptions {
@@ -29,13 +30,7 @@ const STOP_LABEL: Record<string, string> = {
   DUPLICATE: '同前，已於本鏈他處展開'
 }
 
-export function slugify(value: string): string {
-  return value
-    .replace(/[^\w.\-一-鿿]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 100)
-}
+export { slugify } from './paths.js'
 
 /**
  * 頁面標題用業務語言的近似值：觸發方式 + 檔名，而非完整路徑。

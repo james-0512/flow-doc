@@ -5,10 +5,13 @@ import path from 'node:path'
 const REFERENCE = /`([\w./@-]+\.(?:vue|ts|tsx|js|mjs)):(\d+)(?:-(\d+))?`/g
 
 export interface Violation {
-  kind: 'MISSING_FILE' | 'LINE_OUT_OF_RANGE' | 'NOT_IN_PACKET' | 'UNCITED_EFFECT'
+  kind: 'MISSING_FILE' | 'LINE_OUT_OF_RANGE' | 'NOT_IN_PACKET' | 'UNCITED_EFFECT' | 'STALE_SOURCE'
   reference: string
   detail: string
 }
+
+/** 封包的原始碼區塊：`### \`name\` — \`file:start-end\`` 後面接一個 fenced block */
+const PACKET_EXCERPT = /^### `(.+?)` — `([\w./@-]+):(\d+)-(\d+)`\s*$\n+```ts\n([\s\S]*?)\n```/gm
 
 /** 封包裡標成寫入的副作用行，例如 `- [API] POST /x（**寫入**）  \`src/a.ts:19\`` */
 const MUTATING_EFFECT = /^- \[[^\]]+\] (.+?)（\*\*寫入\*\*.*?`([\w./@-]+):(\d+)`\s*$/gm
@@ -77,6 +80,27 @@ export function verifyManual(markdown: string, repoRoot: string, packet?: string
           kind: 'NOT_IN_PACKET',
           reference: ref.raw,
           detail: '此位置不在封包提供的範圍內，可能是臆測'
+        })
+      }
+    }
+  }
+
+  // 過期檢查：封包裡嵌的原始碼就是分析當時的快照，拿它跟現在的檔案比。
+  //
+  // 這是最重要的一層。行號合法但內容已位移的引用會通過前兩層檢查，卻在描述
+  // 完全不同的程式碼——實測目標 repo 換了分支後，29 個引用只有 1 個被抓到，
+  // 其餘 28 個「合法地」指向了無關的行。那比明顯壞掉的引用更危險，因為看起來可信。
+  if (packet) {
+    for (const m of packet.matchAll(PACKET_EXCERPT)) {
+      const [, name, file, startStr, endStr, snapshot] = m
+      const abs = path.join(repoRoot, file!)
+      if (!fs.existsSync(abs)) continue // 上面已回報 MISSING_FILE
+      const current = fs.readFileSync(abs, 'utf8').split('\n').slice(Number(startStr) - 1, Number(endStr)).join('\n')
+      if (current !== snapshot) {
+        violations.push({
+          kind: 'STALE_SOURCE',
+          reference: `\`${file}:${startStr}-${endStr}\``,
+          detail: `\`${name}\` 的程式碼已與分析當時不同，手冊引用的行號可能已位移`
         })
       }
     }

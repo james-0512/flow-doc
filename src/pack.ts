@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { slugify } from './paths.js'
 import type { AsyncLink, ChainNode, FlowChain, SideEffect, TraceResult } from './types.js'
 
 export interface PackOptions {
@@ -205,7 +206,8 @@ export function packFlow(
   md.push('## 原始碼')
   md.push('')
   for (const ex of kept) {
-    md.push(`### \`${ex.name}\` — ${ex.file}:${ex.startLine}-${ex.endLine}`)
+    // file:line 一律包反引號，verify 才能一致地解析出範圍
+    md.push(`### \`${ex.name}\` — \`${ex.file}:${ex.startLine}-${ex.endLine}\``)
     md.push('')
     md.push('```ts')
     md.push(ex.code)
@@ -221,10 +223,7 @@ export function packFlow(
   return md.join('\n')
 }
 
-/** 業務域的檔名安全化 */
-function domainSlug(domain: string): string {
-  return domain.replace(/[^\w.-]+/g, '_')
-}
+const domainSlug = slugify
 
 /**
  * 產生手冊目錄。
@@ -321,14 +320,31 @@ export function groupByHandler(chains: FlowChain[]): Map<FlowChain, FlowChain[]>
 
   const out = new Map<FlowChain, FlowChain[]>()
   for (const group of buckets.values()) {
-    // 代表取副作用最多的那個——它的鏈最完整，敘述寫起來資訊最足
-    const sorted = [...group].sort((a, b) => b.effects.length - a.effects.length)
+    // 代表的挑選順序：副作用最多（鏈最完整）→ 主要觸發動作（按鈕點擊而非按 Enter）
+    // → entryId 字典序。最後一項是為了穩定：同樣的輸入必須產生同樣的封包檔名，
+    // 否則重跑一次就會讓已寫好的手冊對不上。
+    const sorted = [...group].sort(
+      (a, b) =>
+        b.effects.length - a.effects.length ||
+        triggerRank(a.trigger) - triggerRank(b.trigger) ||
+        a.entryId.localeCompare(b.entryId)
+    )
     out.set(sorted[0]!, sorted.slice(1))
   }
   return out
 }
 
-/** 檔名安全化，供 --out-dir 批次輸出。 */
+/** 主要動作優先。同一個 handler 掛在按鈕與 Enter 鍵上時，按鈕才是那條流程的代表。 */
+const PRIMARY_TRIGGERS = ['click', 'ok', 'submit', 'confirm']
+function triggerRank(trigger: string): number {
+  const i = PRIMARY_TRIGGERS.indexOf(trigger)
+  return i === -1 ? PRIMARY_TRIGGERS.length : i
+}
+
+/**
+ * 封包檔名。與 `site` 查找手冊用的 slug 完全相同——寫好的敘述直接同名放進
+ * `manuals/` 就會被接上，不必再做一次名稱換算。
+ */
 export function packFileName(chain: FlowChain): string {
-  return `${chain.domain}__${chain.entryId}`.replace(/[^\w.\-]+/g, '_').slice(0, 120) + '.md'
+  return `${slugify(chain.entryId)}.md`
 }

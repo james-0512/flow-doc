@@ -127,6 +127,20 @@ describe('callsWithin', () => {
     expect(names).toContain('load')
   })
 
+  it('new Promise 的 executor 算當場執行', () => {
+    // 包裝非同步流程最常見的寫法。漏掉它會讓 Promise 內的 API 呼叫整個消失——
+    // 實測讓登入流程的 POST /api/v1/login 從手冊裡不見
+    const fn = bodyOf(
+      `const handler = () => {
+         return new Promise((resolve, reject) => {
+           login(data).then(res => resolve(res)).catch(reject)
+         })
+       }`,
+      'handler'
+    )
+    expect(callsWithin(fn).map(c => c.getExpression().getText().replace(/\s+/g, ''))).toContain('login')
+  })
+
   it('IIFE 也算當場執行', () => {
     const fn = bodyOf(`const f = () => { (() => { boom() })() }`, 'f')
     expect(callsWithin(fn).map(c => c.getExpression().getText())).toContain('boom')

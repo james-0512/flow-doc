@@ -42,6 +42,35 @@ describe('verifyManual', () => {
     expect(cited.violations).toEqual([])
   })
 
+  it('抓到「行號合法但內容已位移」的過期引用', () => {
+    // 這是最危險的一種：目標 repo 改動後，引用仍然指向存在的行，
+    // 只是那些行變成了無關的程式碼。前兩層檢查完全抓不到。
+    const stale = [
+      '### `createDemo` — `src/api/demo.ts:3-5`',
+      '',
+      '```ts',
+      'export async function createDemo(data: unknown) {',
+      "  return apiService.post('/api/v1/DIFFERENT/path', data)",
+      '}',
+      '```'
+    ].join('\n')
+    const result = verifyManual('見 `src/api/demo.ts:4`。', REPO, stale)
+    expect(result.violations).toMatchObject([{ kind: 'STALE_SOURCE' }])
+  })
+
+  it('封包內容與現況一致時不報過期', () => {
+    const fresh = [
+      '### `createDemo` — `src/api/demo.ts:3-5`',
+      '',
+      '```ts',
+      'export async function createDemo(data: unknown) {',
+      "  return apiService.post('/api/v1/demo/create', data)",
+      '}',
+      '```'
+    ].join('\n')
+    expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, fresh).violations).toEqual([])
+  })
+
   it('封包給的是區間時，區間內任一行都算合法引用', () => {
     const packet = '- **createDemo** `src/api/demo.ts:3-5`'
     expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, packet).violations).toEqual([])

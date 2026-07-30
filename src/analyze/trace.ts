@@ -166,13 +166,62 @@ function sourceFileFor(t: Tracer, rel: string): SourceFile | undefined {
   )
 }
 
-/** 以名稱在某個檔案的頂層作用域找 handler 函式。 */
+/**
+ * 以名稱在某個檔案的頂層作用域找 handler 函式。
+ *
+ * 第三條路（解構）是必要的：現代 Vue 大量使用 `const { login } = useLoginForm()`
+ * 把邏輯抽到 composable。只查 function/variable 宣告的話，這類 handler 全部起不了鏈——
+ * 實測目標專案把登入重構進 composable 之後，整個登入流程就從手冊裡消失了。
+ */
 function resolveNamedHandler(t: Tracer, rel: string, name: string | undefined): Node | null {
   if (!name || name.includes('.')) return null
   const sf = sourceFileFor(t, rel)
   if (!sf) return null
+
+  // 注意不能在 decl 存在時就 return：`getVariableDeclaration` 連解構綁定也會匹配，
+  // 而那種宣告的 initializer 是 composable 呼叫，toFunctionLike 取不到函式。
+  // 早退的話永遠走不到下面的解構解析。
   const decl = sf.getFunction(name) ?? sf.getVariableDeclaration(name)
-  return decl ? toFunctionLike(decl) : null
+  const direct = decl ? toFunctionLike(decl) : null
+  if (direct) return direct
+
+  for (const element of sf.getDescendantsOfKind(SyntaxKind.BindingElement)) {
+    if (element.getName() !== name) continue
+    const fn = resolveFromComposable(element, name)
+    if (fn) return fn
+  }
+  return null
+}
+
+/**
+ * `const { login } = useLoginForm(…)` → 找出 composable 回傳物件裡的 `login`。
+ *
+ * 不用 `getDefinitionNodes()`：對解構綁定它只回到綁定本身，拿不到實作。
+ * 改走確定性路徑——解析 composable 的呼叫目標，再從它 `return` 的物件字面量
+ * 取同名屬性。
+ */
+function resolveFromComposable(element: Node, name: string): Node | null {
+  const declaration = element.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+  const initializer = declaration?.getInitializer()
+  if (!initializer || !Node.isCallExpression(initializer)) return null
+
+  for (const def of resolveCallTarget(initializer)) {
+    const composable = toFunctionLike(def)
+    if (!composable) continue
+    const body =
+      Node.isFunctionDeclaration(composable) || Node.isArrowFunction(composable)
+        ? composable.getBody()
+        : undefined
+    if (!body) continue
+    for (const ret of body.getDescendantsOfKind(SyntaxKind.ReturnStatement)) {
+      const expr = ret.getExpression()
+      if (!expr || !Node.isObjectLiteralExpression(expr)) continue
+      const prop = expr.getProperty(name)
+      const fn = prop ? toFunctionLike(prop) : null
+      if (fn) return fn
+    }
+  }
+  return null
 }
 
 /**
