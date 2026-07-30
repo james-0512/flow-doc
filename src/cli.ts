@@ -5,7 +5,7 @@ import { Command } from 'commander'
 import { loadConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
-import { defaultPackOptions, packFileName, packFlow, packOverviews } from './pack.js'
+import { defaultPackOptions, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
 import { buildSite, defaultSiteOptions, slugify } from './site.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
@@ -163,6 +163,7 @@ program
   .option('--all', '連非流程（純查詢／UI 操作）也打包', false)
   .option('--max-chars <n>', '單一封包的原始碼字元上限', String(defaultPackOptions.maxSourceChars))
   .option('--limitations <file>', '已知限制清單，會附在總覽末尾', 'LIMITATIONS.md')
+  .option('--per-trigger', '每個觸發點各出一份封包，不依 handler 合併', false)
   .action(
     (
       chainsFile: string,
@@ -173,6 +174,7 @@ program
         all: boolean
         maxChars: string
         limitations: string
+        perTrigger: boolean
       }
     ) => {
       if (!fs.existsSync(chainsFile)) {
@@ -189,11 +191,24 @@ program
       fs.mkdirSync(opts.outDir, { recursive: true })
       const packOpts = { maxSourceChars: Number(opts.maxChars) }
       let total = 0
-      for (const chain of [...result.crosscut, ...chains]) {
+      let merged = 0
+      // 同一個 handler 只出一份封包，其餘觸發點列在封包內
+      const groups = opts.perTrigger
+        ? new Map(chains.map(c => [c, [] as typeof chains]))
+        : groupByHandler(chains)
+      for (const chain of result.crosscut) {
         const md = packFlow(result.repoRoot, chain, packOpts)
+        if (md) {
+          fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
+          total += md.length
+        }
+      }
+      for (const [chain, siblings] of groups) {
+        const md = packFlow(result.repoRoot, chain, packOpts, siblings)
         if (!md) continue
         fs.writeFileSync(path.join(opts.outDir, packFileName(chain)), md, 'utf8')
         total += md.length
+        merged += siblings.length
       }
       // 限制清單要跟著目錄走，讀手冊的人才知道「哪些東西手冊不會說」
       const limitations = fs.existsSync(opts.limitations)
@@ -203,8 +218,11 @@ program
       const overviews = packOverviews(result, limitations)
       for (const [name, md] of overviews) fs.writeFileSync(path.join(opts.outDir, name), md, 'utf8')
 
-      console.log(`\n已打包 ${chains.length} 條流程 + ${result.crosscut.length} 條全域前置到 ${path.resolve(opts.outDir)}`)
-      console.log(`  總字元 ${total.toLocaleString()} · 平均 ${chains.length ? Math.round(total / chains.length).toLocaleString() : 0} 字元/流程`)
+      const packets = groups.size + result.crosscut.length
+      console.log(`\n已打包 ${packets} 份封包到 ${path.resolve(opts.outDir)}`)
+      console.log(`  涵蓋 ${chains.length} 條流程 + ${result.crosscut.length} 條全域前置`)
+      if (merged > 0) console.log(`  ${merged} 個觸發點與其他流程共用 handler，已合併（省下 ${merged} 份敘述）`)
+      console.log(`  總字元 ${total.toLocaleString()} · 平均 ${packets ? Math.round(total / packets).toLocaleString() : 0} 字元/封包`)
       console.log(`  目錄：00-overview.md + ${overviews.size - 1} 份業務域清單`)
     }
   )
@@ -237,9 +255,22 @@ program
         for (const f of fs.readdirSync(opts.manuals)) {
           if (f.endsWith('.md')) byslug.set(f.replace(/\.md$/, ''), fs.readFileSync(path.join(opts.manuals, f), 'utf8'))
         }
-        for (const c of [...result.crosscut, ...result.chains]) {
+        const all = [...result.crosscut, ...result.chains]
+        for (const c of all) {
           const hit = byslug.get(slugify(c.entryId))
           if (hit) manuals.set(c.entryId, hit)
+        }
+        // 一份敘述涵蓋整組共用 handler 的觸發點（pack 也是依此合併的），
+        // 否則同一條程式碼路徑的其他觸發鈕會顯示成「尚未撰寫」
+        const byHandler = new Map<string, string>()
+        for (const c of all) {
+          const md = manuals.get(c.entryId)
+          if (md && c.root) byHandler.set(`${c.root.loc.file}:${c.root.loc.line}`, md)
+        }
+        for (const c of all) {
+          if (manuals.has(c.entryId) || !c.root) continue
+          const md = byHandler.get(`${c.root.loc.file}:${c.root.loc.line}`)
+          if (md) manuals.set(c.entryId, md)
         }
       }
 

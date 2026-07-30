@@ -119,7 +119,13 @@ function collectLinks(node: ChainNode, out: AsyncLink[]): void {
  * 不再回頭查程式碼，因此裡面的每個 `file:line` 都必須是可驗證的真實位置——
  * 這正是 plan.md §3 階段四要求「每步對應 file:line」的防幻覺機制的前半段。
  */
-export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions = defaultPackOptions): string {
+export function packFlow(
+  repoRoot: string,
+  chain: FlowChain,
+  opts: PackOptions = defaultPackOptions,
+  /** 共用同一個 handler 的其他觸發點。同一條程式碼路徑只寫一次敘述 */
+  siblings: FlowChain[] = []
+): string {
   if (!chain.root) return ''
 
   const excerpts = new Map<string, SourceExcerpt>()
@@ -159,6 +165,15 @@ export function packFlow(repoRoot: string, chain: FlowChain, opts: PackOptions =
   md.push(`- 分類：${chain.flowKind === 'write' ? '**寫入型流程**（會改變資料）' : chain.flowKind === 'read' ? '查詢型流程（只讀後端）' : '純 UI 操作（未碰後端）'}`)
   md.push(`- 業務域：\`${chain.domain}\``)
   md.push(`- 觸發點：\`${chain.entryLoc.file}:${chain.entryLoc.line}\``)
+  if (siblings.length > 0) {
+    md.push(
+      `- **另有 ${siblings.length} 個觸發點走同一條程式碼路徑**，敘述只需寫一次，` +
+        `但要在「觸發」一節列出全部：`
+    )
+    for (const s of siblings) {
+      md.push(`  - ${s.tag ? `\`${s.tag}\` ` : ''}\`@${s.trigger}\`  \`${s.entryLoc.file}:${s.entryLoc.line}\``)
+    }
+  }
   md.push(`- 節點數 ${chain.nodeCount} · 最大深度 ${chain.maxDepth}`)
   if (chain.unresolvedCalls > 0) {
     md.push(`- 鏈中有 ${chain.unresolvedCalls} 個呼叫解析不到定義（多為內建方法），**未包含在下方原始碼中**`)
@@ -282,6 +297,34 @@ export function packOverviews(result: TraceResult, limitations?: string): Map<st
     out.set(`overview-${domainSlug(domain)}.md`, md.join('\n'))
   }
 
+  return out
+}
+
+/**
+ * 依「根函式位置」分組。
+ *
+ * 搜尋框、下拉、日期選擇器往往綁在同一個查詢 handler 上——那是**一條**業務流程的
+ * 三個觸發鈕，不是三條流程。實測 902 條流程只有 665 條相異程式碼路徑；不分組會
+ * 產出 237 節幾乎一樣的敘述，既浪費也讓手冊變難讀。
+ *
+ * @returns 代表流程 → 其餘共用同一 handler 的流程
+ */
+export function groupByHandler(chains: FlowChain[]): Map<FlowChain, FlowChain[]> {
+  const buckets = new Map<string, FlowChain[]>()
+  for (const c of chains) {
+    if (!c.root) continue
+    const key = `${c.root.loc.file}:${c.root.loc.line}`
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(c)
+    else buckets.set(key, [c])
+  }
+
+  const out = new Map<FlowChain, FlowChain[]>()
+  for (const group of buckets.values()) {
+    // 代表取副作用最多的那個——它的鏈最完整，敘述寫起來資訊最足
+    const sorted = [...group].sort((a, b) => b.effects.length - a.effects.length)
+    out.set(sorted[0]!, sorted.slice(1))
+  }
   return out
 }
 
