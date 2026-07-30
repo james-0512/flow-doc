@@ -235,7 +235,12 @@ export function buildSite(
   // 全域前置索引
   if (result.crosscut.length > 0) {
     const md = ['# 全域前置', '', '每一條業務流程都會經過以下處理。各流程頁面不重複展開這一段。', '']
-    for (const c of result.crosscut) md.push(`- [${c.label}](./${slugify(c.entryId)}.md)`)
+    for (const c of result.crosscut) {
+      // 有敘述時用敘述的標題，並保留原始 label 當副標——讀者要能對回程式碼裡的名字
+      const manual = manuals.get(c.entryId)
+      const title = flowTitle(c, manual)
+      md.push(`- [${title}](./${slugify(c.entryId)}.md)${title === c.label ? '' : `　<small>${c.label}</small>`}`)
+    }
     pages.push({ file: 'flows/全域前置/index.md', content: md.join('\n') })
   }
 
@@ -382,7 +387,7 @@ function renderConfig(
             text: '全域前置',
             collapsed: false,
             items: result.crosscut.map(c => ({
-              text: c.label,
+              text: flowTitle(c, manuals.get(c.entryId)),
               link: `/flows/${slugify(c.domain)}/${slugify(c.entryId)}`
             }))
           }
