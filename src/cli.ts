@@ -266,18 +266,22 @@ program
       // 手冊敘述以 entryId 的 slug 命名，有幾條放幾條
       const manuals = new Map<string, string>()
       const primaries = new Set<string>()
-      let crosscutOverview: string | undefined
+      const overviews = new Map<string, string>()
       if (opts.manuals && fs.existsSync(opts.manuals)) {
+        // 篇章總覽：overviews/<域 slug>.md，注入該域 index 頁的流程清單之前。
+        // 它不是單一流程的敘述，所以放子目錄，跟 entryId 對應的檔案分開
+        const overviewDir = path.join(opts.manuals, 'overviews')
+        if (fs.existsSync(overviewDir)) {
+          for (const f of fs.readdirSync(overviewDir)) {
+            if (!f.endsWith('.md')) continue
+            overviews.set(f.replace(/\.md$/, ''), fs.readFileSync(path.join(overviewDir, f), 'utf8'))
+          }
+        }
         const byslug = new Map<string, string>()
         const byCovers = new Map<string, string>()
         for (const f of fs.readdirSync(opts.manuals)) {
           if (!f.endsWith('.md')) continue
           const md = fs.readFileSync(path.join(opts.manuals, f), 'utf8')
-          // 全域前置總覽不是單一流程的敘述，而是跨封包的綜合，注入全域前置 index 頁
-          if (f === 'crosscut-overview.md') {
-            crosscutOverview = md
-            continue
-          }
           byslug.set(f.replace(/\.md$/, ''), md)
           // 一份敘述可用 frontmatter 的 covers: 明確宣告它涵蓋哪些流程。
           // 副作用相同的多個控件（篩選、分頁、查詢鈕）其實是同一件事，
@@ -314,7 +318,7 @@ program
         limitations,
         { title: opts.title, sourceBaseUrl: opts.sourceBase },
         primaries,
-        crosscutOverview
+        overviews
       )
 
       fs.rmSync(path.join(opts.outDir, 'flows'), { recursive: true, force: true })
