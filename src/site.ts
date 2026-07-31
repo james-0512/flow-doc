@@ -236,7 +236,8 @@ export function buildSite(
   manualPrimaries: ReadonlySet<string> = new Set(),
   /**
    * 篇章總覽（`overviews/<域 slug>.md`）——跨封包的綜合敘述，key 是域的 slug，
-   * 注入該域 index 頁的流程清單之前。全域前置也走同一條路
+   * 注入該域 index 頁的流程清單之前。全域前置也走同一條路。
+   * 保留字 `00-全站` 是跨篇章的全站總覽，自成一頁（/overview）並掛進側邊欄與導覽列
    */
   overviews?: ReadonlyMap<string, string>
 ): SitePage[] {
@@ -359,6 +360,15 @@ export function buildSite(
   ]
   pages.push({ file: 'index.md', content: home.join('\n') })
 
+  // 全站總覽自成一頁：塞進 domains.md 的話側邊欄看不到它的存在
+  const siteOverview = overviews?.get('00-全站')
+  if (siteOverview) {
+    pages.push({
+      file: 'overview.md',
+      content: `# 全站總覽\n\n${siteOverview.trim().replace(/^#\s+.+\n+/, '')}\n`
+    })
+  }
+
   const domainsMd = ['# 業務域', '']
   for (const [domain, list] of domains) {
     const w = list.filter(c => c.flowKind === 'write').length
@@ -370,7 +380,7 @@ export function buildSite(
 
   pages.push({
     file: '.vitepress/config.mts',
-    content: renderConfig(result, domains, manuals, manualPrimaries, opts)
+    content: renderConfig(result, domains, manuals, manualPrimaries, opts, Boolean(siteOverview))
   })
 
   // 站台自帶 package.json，與分析器的依賴完全分離。
@@ -389,7 +399,16 @@ export function buildSite(
           build: 'vitepress build .',
           preview: 'vitepress preview .'
         },
+        // mermaid 的 CJS 依賴（dayjs 等）必須是本套件的「直接」依賴：
+        // vitepress-plugin-mermaid 會把它們塞進 optimizeDeps.include，但 pnpm 的
+        // 嚴格 node_modules 讓 Vite 從專案根解析不到，預打包被跳過後，dev server
+        // 會把 CJS 的 dayjs.min.js 直接當 ESM 送給瀏覽器而炸掉（build 不受影響）。
         devDependencies: {
+          '@braintree/sanitize-url': '^7.1.2',
+          cytoscape: '^3.34.0',
+          'cytoscape-cose-bilkent': '^4.1.0',
+          dayjs: '^1.11.21',
+          debug: '^4.4.0',
           mermaid: '^11.4.1',
           vitepress: '^1.6.4',
           'vitepress-plugin-mermaid': '^2.0.17'
@@ -424,12 +443,14 @@ function renderConfig(
   domains: [string, FlowChain[]][],
   manuals: ReadonlyMap<string, string>,
   manualPrimaries: ReadonlySet<string>,
-  opts: SiteOptions
+  opts: SiteOptions,
+  hasSiteOverview = false
 ): string {
   const sidebar = [
     {
       text: '總覽',
       items: [
+        ...(hasSiteOverview ? [{ text: '全站總覽', link: '/overview' }] : []),
         { text: '業務域', link: '/domains' },
         { text: 'API 對照表', link: '/api' },
         { text: '已知限制', link: '/limitations' }
@@ -439,6 +460,9 @@ function renderConfig(
       ? [
           {
             text: '全域前置',
+            // 群組標題兼作篇章總覽（index.md）的入口：sidebar 若不給 link，
+            // 這頁在站上就沒有任何導覽路徑，只能靠改網址進去
+            link: '/flows/全域前置/',
             collapsed: false,
             items: result.crosscut.map(c => ({
               text: flowTitle(c, manuals.get(c.entryId)),
@@ -451,6 +475,7 @@ function renderConfig(
       const collapsed = collapseByManual(list, manuals, manualPrimaries)
       return {
         text: `${domain}（${collapsed.length}）`,
+        link: `/flows/${slugify(domain)}/`,
         collapsed: true,
         items: collapsed.map(({ chain: c, triggerCount }) => ({
           text: flowTitle(c, manuals.get(c.entryId)) + (triggerCount > 1 ? `（${triggerCount}）` : ''),
@@ -474,11 +499,12 @@ export default withMermaid({
   themeConfig: {
     outline: [2, 3],
     search: { provider: 'local' },
-    nav: [
+    nav: ${JSON.stringify([
+      ...(hasSiteOverview ? [{ text: '全站總覽', link: '/overview' }] : []),
       { text: '業務域', link: '/domains' },
       { text: 'API 對照表', link: '/api' },
       { text: '已知限制', link: '/limitations' }
-    ],
+    ])},
     sidebar: ${JSON.stringify(sidebar, null, 4).replace(/\n/g, '\n    ')},
     docFooter: { prev: false, next: false }
   }
