@@ -7,8 +7,11 @@ import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
 import { defaultPackOptions, findPeers, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
 import { buildSite, defaultSiteOptions, slugify } from './site.js'
-import { defaultDiffOptions, diffFlows, type ChangeKind } from './diff.js'
-import { readManualIndex } from './manuals.js'
+import { applyRenames, defaultDiffOptions, diffFlows, type ChangeKind } from './diff.js'
+import { manualFileFor, readManualIndex } from './manuals.js'
+import { buildLineMap, mergeLineMaps, reanchorManual, type LineMap } from './reanchor.js'
+import { structureSignature } from './signature.js'
+import { detectRenames } from './version.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
 
@@ -327,6 +330,17 @@ program
     }
   )
 
+/**
+ * 兩份分析之間的檔案改名對照。取不到就回空表——退回「改名視為 removed＋added」
+ * 的保守行為，比猜錯安全。
+ */
+function renamesBetween(baseline: TraceResult, current: TraceResult): Map<string, string> {
+  const from = baseline.target?.commit
+  const to = current.target?.commit
+  if (!from || !to || from === to) return new Map()
+  return detectRenames(current.repoRoot, from, to)
+}
+
 program
   .command('diff')
   .description('閉環核心：比對 baseline 與本次分析，把每條流程分成五類並算出要做的事')
@@ -346,8 +360,11 @@ program
       }
       const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf8')) as TraceResult
       const current = JSON.parse(fs.readFileSync(currentFile, 'utf8')) as TraceResult
+      const renames = renamesBetween(baseline, current)
+      if (renames.size > 0) console.log(`\n偵測到 ${renames.size} 個檔案改名，已對照後再比對`)
       const result = diffFlows(baseline, current, readManualIndex(opts.manuals), {
-        breakerThreshold: Number(opts.threshold)
+        breakerThreshold: Number(opts.threshold),
+        renames
       })
 
       console.log(`\nbaseline  ${result.baseline.commit?.slice(0, 8) ?? '(非 git)'} · 表示法 v${result.baseline.representation}`)
@@ -389,6 +406,95 @@ program
       }
     }
   )
+
+program
+  .command('reanchor')
+  .description('把 moved 分類的敘述機械改寫到新位置——0 token，不動任何文字內容')
+  .argument('<baseline>', '上一輪的 flow-chains.json')
+  .argument('[current]', '本次分析結果', 'flow-chains.json')
+  .option('-m, --manuals <dir>', '手冊敘述目錄', 'manuals')
+  .option('--dry-run', '只列出會怎麼改，不寫檔', false)
+  .action((baselineFile: string, currentFile: string, opts: { manuals: string; dryRun: boolean }) => {
+    for (const f of [baselineFile, currentFile]) {
+      if (!fs.existsSync(f)) {
+        console.error(`找不到 ${f}`)
+        process.exitCode = 1
+        return
+      }
+    }
+    const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf8')) as TraceResult
+    const current = JSON.parse(fs.readFileSync(currentFile, 'utf8')) as TraceResult
+    const index = readManualIndex(opts.manuals)
+    const diff = diffFlows(baseline, current, index, {
+      breakerThreshold: Number.MAX_SAFE_INTEGER,
+      renames: renamesBetween(baseline, current)
+    })
+    if (diff.verdict === 'upgrade') {
+      console.error(diff.reason)
+      process.exitCode = 1
+      return
+    }
+
+    const renames = renamesBetween(baseline, current)
+    // baseline 側套用改名後才與現況同一個鍵空間，跟 diff 的配對方式一致
+    const oldById = new Map(
+      [...baseline.chains, ...baseline.crosscut].map(c => [applyRenames(c.entryId, renames), c])
+    )
+    const newById = new Map([...current.chains, ...current.crosscut].map(c => [c.entryId, c]))
+
+    // 一份敘述涵蓋的不只一條鏈：`covers:` 宣告的、以及共用同一個 handler 的其他觸發點
+    // （pack 就是依 handler 合併封包的，敘述的觸發表會列出各觸發點的位置）。
+    // 只從 moved 的那幾條建表的話，其餘鏈的引用會查不到而被誤報成「對照不到」——
+    // 它們其實只是不需要改。所以以檔案為單位收齊所有相關的鏈。
+    const fileOfChain = new Map<string, string>()
+    const handlerFile = new Map<string, string>()
+    for (const c of newById.values()) {
+      const file = manualFileFor(index, c.entryId)
+      if (!file) continue
+      fileOfChain.set(c.entryId, file)
+      if (c.root) handlerFile.set(`${c.root.loc.file}:${c.root.loc.line}`, file)
+    }
+    for (const c of newById.values()) {
+      if (fileOfChain.has(c.entryId) || !c.root) continue
+      const file = handlerFile.get(`${c.root.loc.file}:${c.root.loc.line}`)
+      if (file) fileOfChain.set(c.entryId, file)
+    }
+
+    const needsWork = new Set(diff.work.reanchor.map(id => fileOfChain.get(id)).filter(Boolean) as string[])
+    const mapsByFile = new Map<string, LineMap[]>()
+    for (const [entryId, file] of fileOfChain) {
+      if (!needsWork.has(file)) continue
+      const next = newById.get(entryId)
+      const prev = oldById.get(entryId)
+      // 結構不同的鏈不可以拿來建對照表：對錯位置比不改更糟
+      if (!next || !prev || structureSignature(prev) !== structureSignature(next)) continue
+      mapsByFile.set(file, [...(mapsByFile.get(file) ?? []), buildLineMap(prev, next)])
+    }
+
+    let changed = 0
+    let refs = 0
+    const stillUnmapped: string[] = []
+    for (const [file, maps] of mapsByFile) {
+      const abs = path.join(opts.manuals, file)
+      if (!fs.existsSync(abs)) continue
+      const before = fs.readFileSync(abs, 'utf8')
+      const out = reanchorManual(before, mergeLineMaps(maps))
+      refs += out.rewritten
+      for (const u of out.unmapped) stillUnmapped.push(`${file} → ${u}`)
+      if (out.text === before) continue
+      changed++
+      if (!opts.dryRun) fs.writeFileSync(abs, out.text, 'utf8')
+    }
+
+    console.log(`\n${opts.dryRun ? '（預演）' : ''}改寫 ${changed} 份敘述、共 ${refs} 處位置引用`)
+    console.log(`  moved 且有敘述的流程 ${diff.work.reanchor.length} 條`)
+    if (stillUnmapped.length > 0) {
+      console.log(`\n對照不到、原樣保留的引用 ${stillUnmapped.length} 處（verify 會抓出來，不猜）：`)
+      for (const u of stillUnmapped.slice(0, 10)) console.log(`  ${u}`)
+      if (stillUnmapped.length > 10) console.log(`  …另有 ${stillUnmapped.length - 10} 處`)
+    }
+    console.log(`\n下一步：對改動過的章節跑 verify，確認引用都落在新封包內。`)
+  })
 
 program
   .command('verify')

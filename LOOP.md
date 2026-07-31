@@ -37,7 +37,7 @@ flowchart TD
 | 分類 | 判定 | 動作 | 成本 |
 |---|---|---|---|
 | unchanged | 三者全同 | 不動 | 0 |
-| moved | 結構與主體同，只有行號漂 | `reanchor` 機械改寫敘述裡的 `:N` 引用 | 0 |
+| moved | 結構與主體同，只有行號漂（含**檔案改名**） | `reanchor` 機械改寫敘述裡的位置引用 | 0 |
 | changed | 結構變了，**或**結構同但主體改了 | LLM 重寫該章 → verify | token |
 | added | 新 entry 成為流程 | 落在已維護的域才補寫 | token |
 | removed | entry 消失 | 歸檔下架、列入變更頁 | 0 |
@@ -227,15 +227,16 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 
 現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
 與設定解析、每個目標自帶設定的手冊 repo（D9）、語意 ID 與 baseline metadata（D10）、
-**`flow-doc diff` 五分類＋熔斷＋版本比對（D11）**。缺三件，依序：
+`flow-doc diff` 五分類＋熔斷＋版本比對（D11）、**`flow-doc reanchor` 與 git rename
+偵測（D12）**。缺兩件，依序：
 
-1. `flow-doc reanchor`——moved 章節的行號機械改寫。diff 已能精確指出哪些章屬於這類
-2. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
-3. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
+1. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關。
+   這是唯一還需要人在迴圈裡的一步
+2. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
    （每個目標一條 pipeline 實例）
 
-diff 尚未做 **git rename 偵測**：檔案搬移目前會被判成 removed＋added。
-在 reanchor 之前補上即可。
+**0-token 的那條路徑已經端到端跑通**：`trace → diff → reanchor → verify`
+全部是確定性的，不需要 LLM。純 moved 的輪次現在就能全自動完成。
 
 ## 成本輪廓與殘餘風險
 

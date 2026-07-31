@@ -18,8 +18,9 @@ import { fileURLToPath } from 'node:url'
  * - 1：初版。entry ID 為 `檔案:行號:標籤:事件`
  * - 2：entry ID 改為語意錨點（不含行號），新增 legacyEntryId 供一次性遷移
  * - 3：每條鏈新增 sourceHash，供 diff 偵測「結構沒變但主體改了」
+ * - 4：sourceHash 不再含檔案路徑，純改名才不會被誤判成主體變更
  */
-export const REPRESENTATION_VERSION = 3
+export const REPRESENTATION_VERSION = 4
 
 let cachedVersion: string | null = null
 
@@ -62,4 +63,27 @@ export function readTargetRevision(repoRoot: string): TargetRevision {
   const commit = git(repoRoot, ['rev-parse', 'HEAD'])
   if (commit === null) return { commit: null, dirty: false }
   return { commit, dirty: (git(repoRoot, ['status', '--porcelain']) ?? '') !== '' }
+}
+
+/**
+ * 兩個 commit 之間的檔案改名對照（舊路徑 → 新路徑）。
+ *
+ * entry ID 含檔案路徑，所以搬一個資料夾會讓底下每條流程都變成
+ * removed ＋ added——實際上它們只是換了位置，敘述完全還能用。
+ * 有了這張表，diff 先把 baseline 的 ID 換成新路徑再比對，於是落在 moved，
+ * 走 0-token 的機械改寫。
+ *
+ * 取不到（不是 git repo、commit 不存在、淺層 clone 沒有歷史）就回空表，
+ * 退回「改名視為 removed＋added」的保守行為，不會出錯只是比較浪費。
+ */
+export function detectRenames(repoRoot: string, from: string, to: string): Map<string, string> {
+  const out = git(repoRoot, ['diff', '--name-status', '--diff-filter=R', '-M', from, to])
+  const renames = new Map<string, string>()
+  if (!out) return renames
+  for (const line of out.split('\n')) {
+    const [status, oldPath, newPath] = line.split('\t')
+    if (!status?.startsWith('R') || !oldPath || !newPath) continue
+    renames.set(oldPath, newPath)
+  }
+  return renames
 }

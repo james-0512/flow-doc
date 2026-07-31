@@ -33,8 +33,13 @@ cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 | `entries` | 掃 entry point 候選（UI 事件、生命週期、路由） |
 | `trace` | 從 entry 出發 DFS 追呼叫鏈，解析副作用與跨元件連結 |
 | `pack` | 把每條鏈序列化成自足的 Markdown 封包，供 LLM 撰寫敘述 |
+| `diff` | 比對 baseline 與本次分析，分成五類並算出要做的事 |
+| `reanchor` | 把只有位置變動的敘述機械改寫到新位置（0 token） |
 | `site` | 產生 VitePress 站台 |
 | `verify` | 檢查生成的敘述沒有幻覺 |
+
+`diff` 與 `reanchor` 是閉環的骨架（見 [LOOP.md](LOOP.md)）：多數 commit 只讓行號漂移，
+那些章節不需要 LLM 重寫，機械改寫即可。
 
 撰寫敘述用 `.claude/skills/flow-manual`：讀 `packets/*.md`，寫進 `manuals/<entryId slug>.md`。
 這份 skill 是「源」，各手冊 repo 的 `.claude/skills/` 有一份複本；改規則只改這裡，

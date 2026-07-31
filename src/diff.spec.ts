@@ -45,6 +45,7 @@ function manualsFor(...entryIds: string[]): ManualIndex {
   return {
     bySlug: new Map(entryIds.map(id => [slugify(id), '敘述'])),
     byCovers: new Map(),
+    coversFile: new Map(),
     overviews: new Map()
   }
 }
@@ -124,6 +125,47 @@ describe('diffFlows 不主動補寫', () => {
   })
 })
 
+describe('diffFlows 檔案改名', () => {
+  const renames = new Map([['src/views/Old/IndexView.vue', 'src/views/New/IndexView.vue']])
+
+  it('沒有改名對照時，搬檔案 = removed ＋ added（保守但浪費）', () => {
+    const before = chain('src/views/Old/IndexView.vue#button.click@save', node('save', 10))
+    const after = chain('src/views/New/IndexView.vue#button.click@save', node('save', 10))
+    const d = diffFlows(result([before]), result([after]), manualsFor(before.entryId))
+    expect(d.counts.removed).toBe(1)
+    expect(d.counts.added).toBe(1)
+  })
+
+  it('有改名對照時配得起來，且因為路徑變了而落在 moved（0 token）', () => {
+    const before = chain('src/views/Old/IndexView.vue#button.click@save', node('save', 10))
+    const after = chain('src/views/New/IndexView.vue#button.click@save', {
+      ...node('save', 10),
+      loc: { file: 'src/views/New/IndexView.vue', line: 10 }
+    })
+    const d = diffFlows(result([before]), result([after]), manualsFor(after.entryId), {
+      breakerThreshold: 30,
+      renames
+    })
+    expect(d.counts.removed).toBe(0)
+    expect(d.counts.added).toBe(0)
+    expect(d.counts.moved).toBe(1)
+    expect(d.work.rewrite).toEqual([])
+  })
+
+  it('crosscut 的 ID 也要套用改名', () => {
+    const before = chain('crosscut:src/views/Old/IndexView.vue#路由守衛 — A', node('guard', 3))
+    const after = chain('crosscut:src/views/New/IndexView.vue#路由守衛 — A', {
+      ...node('guard', 3),
+      loc: { file: 'src/views/New/IndexView.vue', line: 3 }
+    })
+    const d = diffFlows(result([before]), result([after]), manualsFor(after.entryId), {
+      breakerThreshold: 30,
+      renames
+    })
+    expect(d.counts.moved).toBe(1)
+  })
+})
+
 describe('diffFlows 護欄', () => {
   it('表示法版本不同 → 走升版圈，不做逐條比對', () => {
     const a = chain('a.vue#button.click@save', node('save', 10))
@@ -140,7 +182,8 @@ describe('diffFlows 護欄', () => {
       after.push(chain(`a.vue#button.click@fn${i}`, node(`fn${i}`, 10), { sourceHash: 'moved' }))
     }
     const d = diffFlows(result(before), result(after), manualsFor(...before.map(c => c.entryId)), {
-      breakerThreshold: 3
+      breakerThreshold: 3,
+      renames: new Map()
     })
     expect(d.verdict).toBe('breaker')
     expect(d.work.rewrite).toHaveLength(5)

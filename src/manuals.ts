@@ -7,6 +7,8 @@ export interface ManualIndex {
   bySlug: Map<string, string>
   /** `covers:` 宣告的 entryId → 敘述內容 */
   byCovers: Map<string, string>
+  /** `covers:` 宣告的 entryId → 該敘述的檔名。reanchor 要寫回檔案，光有內容不夠 */
+  coversFile: Map<string, string>
   /** 篇章總覽：`overviews/<域 slug>.md` */
   overviews: Map<string, string>
 }
@@ -32,7 +34,12 @@ export function stripFrontmatter(markdown: string): string {
  * 閉環會把已經寫過的章節當成沒寫過（或反之），而且錯得很安靜。
  */
 export function readManualIndex(dir: string): ManualIndex {
-  const index: ManualIndex = { bySlug: new Map(), byCovers: new Map(), overviews: new Map() }
+  const index: ManualIndex = {
+    bySlug: new Map(),
+    byCovers: new Map(),
+    coversFile: new Map(),
+    overviews: new Map()
+  }
   if (!fs.existsSync(dir)) return index
 
   const overviewDir = path.join(dir, 'overviews')
@@ -48,7 +55,10 @@ export function readManualIndex(dir: string): ManualIndex {
     const md = fs.readFileSync(path.join(dir, f), 'utf8')
     const body = stripFrontmatter(md)
     index.bySlug.set(f.replace(/\.md$/, ''), body)
-    for (const id of parseCovers(md)) index.byCovers.set(id, body)
+    for (const id of parseCovers(md)) {
+      index.byCovers.set(id, body)
+      index.coversFile.set(id, f)
+    }
   }
   return index
 }
@@ -56,4 +66,11 @@ export function readManualIndex(dir: string): ManualIndex {
 /** 這條流程有沒有敘述（檔名直接對應，或被別份敘述的 `covers:` 涵蓋）。 */
 export function hasManual(index: ManualIndex, entryId: string): boolean {
   return index.bySlug.has(slugify(entryId)) || index.byCovers.has(entryId)
+}
+
+/** 這條流程的敘述寫在哪個檔案。沒有敘述時回 null。 */
+export function manualFileFor(index: ManualIndex, entryId: string): string | null {
+  const slug = slugify(entryId)
+  if (index.bySlug.has(slug)) return `${slug}.md`
+  return index.coversFile.get(entryId) ?? null
 }

@@ -181,6 +181,12 @@ export function packFlow(
         `很可能是同一個業務動作的不同控件（例如篩選條件、分頁、查詢鈕都呼叫同一支查詢）。`
     )
     md.push('>')
+    // 位置要明列。語意 ID 不含行號，敘述的「觸發」一節若要列出這些控件，
+    // 沒有這幾行就只能自己編——而編出來的行號會被 verify 判為臆測
+    for (const p of peers) {
+      md.push(`> - \`${p.tag ?? ''}\` \`@${p.trigger}\`  \`${p.entryLoc.file}:${p.entryLoc.line}\``)
+    }
+    md.push('>')
     md.push('> 判斷是同一件事的話，只寫一份敘述，並在 frontmatter 用 `covers:` 宣告涵蓋範圍：')
     md.push('>')
     md.push('> ```yaml')

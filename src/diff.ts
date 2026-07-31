@@ -46,12 +46,32 @@ export interface DiffResult {
 export interface DiffOptions {
   /** 需重寫章數超過此值就熔斷。典型觸發情境是資料夾改名或大重構 */
   breakerThreshold: number
+  /** 檔案改名對照（舊路徑 → 新路徑），由 `detectRenames` 取得 */
+  renames: Map<string, string>
 }
 
-export const defaultDiffOptions: DiffOptions = { breakerThreshold: 30 }
+export const defaultDiffOptions: DiffOptions = { breakerThreshold: 30, renames: new Map() }
 
-function indexChains(result: TraceResult): Map<string, FlowChain> {
-  return new Map([...result.chains, ...result.crosscut].map(c => [c.entryId, c]))
+/**
+ * 把 entry ID 裡的檔案路徑換成改名後的路徑。
+ *
+ * ID 的形狀是 `<檔案>#...` 或 `crosscut:<檔案>#...`，只換 `#` 之前那段。
+ * 換了之後 baseline 與現況才配得起來，落在 moved 而不是 removed＋added——
+ * 內部節點的 loc 刻意**不**跟著換，那些路徑差異正是要讓行號簽章反映出來的東西，
+ * 敘述裡引用的舊路徑得靠 reanchor 改寫。
+ */
+export function applyRenames(entryId: string, renames: Map<string, string>): string {
+  if (renames.size === 0) return entryId
+  const hashAt = entryId.indexOf('#')
+  if (hashAt === -1) return entryId
+  const prefix = entryId.startsWith('crosscut:') ? 'crosscut:' : ''
+  const file = entryId.slice(prefix.length, hashAt)
+  const renamed = renames.get(file)
+  return renamed ? `${prefix}${renamed}${entryId.slice(hashAt)}` : entryId
+}
+
+function indexChains(result: TraceResult, renames: Map<string, string> = new Map()): Map<string, FlowChain> {
+  return new Map([...result.chains, ...result.crosscut].map(c => [applyRenames(c.entryId, renames), c]))
 }
 
 /**
@@ -104,7 +124,8 @@ export function diffFlows(
     }
   }
 
-  const before = indexChains(baseline)
+  // baseline 的 ID 先套用改名，才能跟現況配對；現況本來就是新路徑
+  const before = indexChains(baseline, options.renames)
   const after = indexChains(current)
   const changes: FlowChange[] = []
 
