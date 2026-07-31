@@ -5,15 +5,17 @@ Login 域涵蓋**進入系統的入口與帳號憑證維護**：帳密登入、L
 
 域總覽列出 11 個入口（寫入型 10、查詢型 1），但其中 3 個入口——帳密登入的三個觸發點
 （`src/views/Login/Index/IndexView.vue:318`、`:326`、`:340`，同打
-`POST /api/v1/login` 與 `GET /api/v1/unlockTime`）——**沒有產出對應封包**，
-本篇章實際成章 8 條（見下方「未追蹤」）。
+`POST /api/v1/login` 與 `GET /api/v1/unlockTime`）——**封包收在 Electron 域**：
+它們與 Electron 登入頁的三個觸發點走同一條程式碼路徑，封包只產一份，
+敘述見 Electron 篇章的〈使用者帳密登入（Electron 與一般登入頁共用）〉。
+本篇章自身成章 8 條。
 
 ## 四塊功能
 
 ```mermaid
 flowchart TD
     subgraph PW ["帳密登入（登入頁）"]
-        P1["輸入帳密登入<br>POST /api/v1/login＋GET /api/v1/unlockTime<br>（封包未產出，未追蹤）"]
+        P1["輸入帳密登入<br>POST /api/v1/login＋GET /api/v1/unlockTime<br>（敘述見 Electron 篇章〈使用者帳密登入〉）"]
     end
 
     subgraph LN ["LINE 登入"]
@@ -67,9 +69,10 @@ flowchart TD
 
 ## 未追蹤
 
-- **帳密登入三條入口沒有封包**：域總覽列出 `src/views/Login/Index/IndexView.vue:318`
-  （帳號輸入框 Enter）、`:326`（密碼輸入框 Enter）、`:340`（登入按鈕），
-  API 為 `POST /api/v1/login` 與 `GET /api/v1/unlockTime`，但 packets 目錄沒有
-  對應檔案，無法成章。這是本域最核心的流程，建議補產封包後補寫。
+- **帳密登入三條入口的封包收在 Electron 域**：`src/views/Login/Index/IndexView.vue:318`
+  （帳號輸入框 Enter）、`:326`（密碼輸入框 Enter）、`:340`（登入按鈕）與
+  Electron 登入頁共用同一條路徑，封包只在 Electron 域產一份，敘述見該篇章的
+  〈使用者帳密登入（Electron 與一般登入頁共用）〉；登入成功後的 `onSuccess`
+  由各頁注入，兩頁在該處分岔（該章標為未追蹤）。
 - LINE 授權頁之後、返回本站前的流程屬外部服務；返回後帶 `lineLogin=true` 的處理
   在全域前置篇章的路由守衛，不在本域封包內。
