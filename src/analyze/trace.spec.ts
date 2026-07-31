@@ -101,6 +101,19 @@ describe('call chain 追蹤（fixture）', () => {
     expect(chainOf('IndexView.vue#button.click').flowKind).toBe('write')
   })
 
+  it('同一份程式碼跑兩次必須得到完全相同的結果', async () => {
+    // 閉環的前提。分析器只要有任何順序浮動（glob 回傳序、listener 展開序），
+    // 同一個 commit 每晚都會被判成有變更，於是每晚重寫、永遠燒 token。
+    // 實測踩過一次：同一個 emit 的兩個 parent listener 順序會翻轉。
+    const ws = await loadWorkspace(loadConfig(FIXTURE))
+    const again = traceEntries(ws, scanEntries(ws))
+    const strip = (r: TraceResult): unknown => ({
+      chains: r.chains,
+      crosscut: r.crosscut
+    })
+    expect(strip(again)).toEqual(strip(trace))
+  }, 60_000)
+
   it('handler 行號指回 .vue，不是虛擬檔', () => {
     const chain = chainOf('IndexView.vue#button.click')
     expect(chain.root!.loc.file).toBe('src/views/Demo/IndexView.vue')

@@ -231,6 +231,14 @@ export interface FlowChain {
   /** `flowKind !== 'none'` */
   isFlow: boolean
   unresolvedCalls: number
+  /**
+   * 鏈上所有節點原始碼的簽章，於 trace 當下計算。
+   *
+   * diff 只拿得到兩份 JSON，拿不到 baseline 那個 commit 的原始碼，所以這個值
+   * 必須在分析時就算好存起來。它捕捉「呼叫結構沒變但函式主體改了」的情形——
+   * 少了它，手冊會安靜地與程式碼脫節。
+   */
+  sourceHash: string
 }
 
 export interface TraceStats {

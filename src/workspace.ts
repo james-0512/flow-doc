@@ -27,7 +27,10 @@ export async function loadWorkspace(config: AnalyzerConfig): Promise<Workspace> 
     ignore: config.exclude,
     dot: false
   })
-  const files = new Set(found.map(f => f.split(path.sep).join('/')))
+  // 排序是必要的，不是整潔癖：glob 不保證回傳順序，而檔案順序會一路影響
+  // entry 的序數消歧、listener 的展開順序、以及超過上限時哪些被截斷。
+  // 不排序的話，同一個 commit 連跑兩次會產出不同的 JSON，閉環每晚都會看到假變更。
+  const files = new Set(found.map(f => f.split(path.sep).join('/')).sort())
 
   const sfcs = new Map<string, ParsedSfc>()
   const facts = new Map<string, ScriptFacts>()
@@ -54,6 +57,17 @@ export async function loadWorkspace(config: AnalyzerConfig): Promise<Workspace> 
         globalComponents.set(name, target)
         files.add(target)
       }
+    } else {
+      // 這個檔案通常由 unplugin-vue-components 產生且不進版控，所以乾淨 checkout
+      // （CI／容器／git worktree）不會有它。少了它，全域註冊的元件標籤全部解析不到檔案，
+      // entry 判定與 emit 接合會大量改變——**而且完全無聲**。
+      // 對閉環尤其致命：baseline 若在有它的環境產生，第一輪 diff 會滿江紅。
+      console.warn(
+        `\n⚠ 找不到全域元件宣告檔 ${config.globalComponentsDts}\n` +
+          `  它通常是 generated 且不進版控。少了它，全域註冊元件的標籤會解析不到檔案，\n` +
+          `  分析結果與「有它的環境」不可比。請先在目標 repo 跑一次產生它的指令\n` +
+          `  （多為 dev/build 的前置），或把 globalComponentsDts 設為 null 明示本專案沒有。\n`
+      )
     }
   }
 

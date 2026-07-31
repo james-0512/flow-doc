@@ -7,6 +7,8 @@ import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
 import { defaultPackOptions, findPeers, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
 import { buildSite, defaultSiteOptions, slugify } from './site.js'
+import { defaultDiffOptions, diffFlows, type ChangeKind } from './diff.js'
+import { readManualIndex } from './manuals.js'
 import { verifyManual } from './verify.js'
 import type { EntryScanResult, TraceResult } from './types.js'
 
@@ -93,20 +95,6 @@ function printTraceSummary(result: TraceResult): void {
     console.log(`\n無法起鏈的 handler：`)
     for (const { name, count } of stats.unresolvedHandlerTop.slice(0, 10)) console.log(`  ${String(count).padStart(5)}  ${name}`)
   }
-}
-
-/**
- * 取出手冊 frontmatter 裡的 `covers:` 清單。
- *
- * 用意是讓一份敘述明確涵蓋多個觸發點（篩選、分頁、查詢鈕往往是同一個業務動作），
- * 而不是靠副作用相同就自動合併——核准與駁回也可能打同一支 API。
- */
-function parseCovers(markdown: string): string[] {
-  const frontmatter = /^---\n([\s\S]*?)\n---/.exec(markdown)
-  if (!frontmatter) return []
-  const block = /(?:^|\n)covers:\s*\n((?:\s*-\s*.+\n?)+)/.exec(frontmatter[1]!)
-  if (!block) return []
-  return [...block[1]!.matchAll(/^\s*-\s*(.+?)\s*$/gm)].map(m => m[1]!)
 }
 
 /**
@@ -288,32 +276,13 @@ program
       const primaries = new Set<string>()
       const overviews = new Map<string, string>()
       if (opts.manuals && fs.existsSync(opts.manuals)) {
-        // 篇章總覽：overviews/<域 slug>.md，注入該域 index 頁的流程清單之前。
-        // 它不是單一流程的敘述，所以放子目錄，跟 entryId 對應的檔案分開
-        const overviewDir = path.join(opts.manuals, 'overviews')
-        if (fs.existsSync(overviewDir)) {
-          for (const f of fs.readdirSync(overviewDir)) {
-            if (!f.endsWith('.md')) continue
-            overviews.set(f.replace(/\.md$/, ''), fs.readFileSync(path.join(overviewDir, f), 'utf8'))
-          }
-        }
-        const byslug = new Map<string, string>()
-        const byCovers = new Map<string, string>()
-        for (const f of fs.readdirSync(opts.manuals)) {
-          if (!f.endsWith('.md')) continue
-          const md = fs.readFileSync(path.join(opts.manuals, f), 'utf8')
-          // frontmatter 只給 covers: 解析用，注入頁面時要剝掉，不然會渲染成內文
-          const body = md.replace(/^---\n[\s\S]*?\n---\n*/, '')
-          byslug.set(f.replace(/\.md$/, ''), body)
-          // 一份敘述可用 frontmatter 的 covers: 明確宣告它涵蓋哪些流程。
-          // 副作用相同的多個控件（篩選、分頁、查詢鈕）其實是同一件事，
-          // 但不該靠猜——由作者宣告，可稽核。
-          for (const id of parseCovers(md)) byCovers.set(id, body)
-        }
+        // 篇章總覽：overviews/<域 slug>.md，注入該域 index 頁的流程清單之前
+        const index = readManualIndex(opts.manuals)
+        for (const [k, v] of index.overviews) overviews.set(k, v)
         const all = [...result.crosscut, ...result.chains]
         for (const c of all) {
-          const direct = byslug.get(slugify(c.entryId))
-          const hit = direct ?? byCovers.get(c.entryId)
+          const direct = index.bySlug.get(slugify(c.entryId))
+          const hit = direct ?? index.byCovers.get(c.entryId)
           if (!hit) continue
           manuals.set(c.entryId, hit)
           // 檔名直接對應的流程是這份敘述的代表，索引與側邊欄會連到它
@@ -355,6 +324,69 @@ program
       console.log(`  流程 ${result.chains.filter(c => c.isFlow).length} 條 · 全域前置 ${result.crosscut.length} 條 · 已撰寫敘述 ${manuals.size} 條`)
       console.log(`  總計 ${(bytes / 1024).toFixed(0)} KB`)
       console.log(`\n預覽：pnpm site:dev`)
+    }
+  )
+
+program
+  .command('diff')
+  .description('閉環核心：比對 baseline 與本次分析，把每條流程分成五類並算出要做的事')
+  .argument('<baseline>', '上一輪的 flow-chains.json')
+  .argument('[current]', '本次分析結果', 'flow-chains.json')
+  .option('-m, --manuals <dir>', '手冊敘述目錄——沒有既有敘述的流程只報告，不產生工作', 'manuals')
+  .option('-o, --out <file>', '把完整結果寫成 JSON 供閉環腳本判讀')
+  .option('--threshold <n>', '需重寫章數超過此值就熔斷', String(defaultDiffOptions.breakerThreshold))
+  .action(
+    (baselineFile: string, currentFile: string, opts: { manuals: string; out?: string; threshold: string }) => {
+      for (const f of [baselineFile, currentFile]) {
+        if (!fs.existsSync(f)) {
+          console.error(`找不到 ${f}`)
+          process.exitCode = 1
+          return
+        }
+      }
+      const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf8')) as TraceResult
+      const current = JSON.parse(fs.readFileSync(currentFile, 'utf8')) as TraceResult
+      const result = diffFlows(baseline, current, readManualIndex(opts.manuals), {
+        breakerThreshold: Number(opts.threshold)
+      })
+
+      console.log(`\nbaseline  ${result.baseline.commit?.slice(0, 8) ?? '(非 git)'} · 表示法 v${result.baseline.representation}`)
+      console.log(`本次      ${result.current.commit?.slice(0, 8) ?? '(非 git)'} · 表示法 v${result.current.representation}${result.current.dirty ? ' · **工作目錄有未提交變動**' : ''}`)
+
+      if (result.current.dirty) {
+        console.log(`\n注意：dirty 的樹產出的結果不可重現，不該當成下一輪的 baseline。`)
+      }
+
+      const LABEL: Record<ChangeKind, string> = {
+        unchanged: '沒變',
+        moved: '只有行號漂移',
+        changed: '結構或主體變了',
+        added: '新增',
+        removed: '消失'
+      }
+      console.log(`\n流程分類：`)
+      for (const kind of ['unchanged', 'moved', 'changed', 'added', 'removed'] as ChangeKind[]) {
+        console.log(`  ${LABEL[kind].padEnd(14)} ${result.counts[kind]}`)
+      }
+
+      console.log(`\n要做的事（只算有既有敘述的）：`)
+      console.log(`  機械改寫行號（0 token） ${result.work.reanchor.length}`)
+      console.log(`  LLM 重寫                ${result.work.rewrite.length}`)
+      console.log(`  歸檔下架                ${result.work.archive.length}`)
+
+      const notable = result.changes.filter(c => c.kind !== 'unchanged' && c.hasManual)
+      if (notable.length > 0) {
+        console.log(`\n有敘述且有變動的流程（前 15 筆）：`)
+        for (const c of notable.slice(0, 15)) console.log(`  [${LABEL[c.kind]}] ${c.entryId}\n      ${c.detail}`)
+        if (notable.length > 15) console.log(`  …另有 ${notable.length - 15} 筆`)
+      }
+
+      console.log(`\n判定：${result.verdict}——${result.reason}`)
+
+      if (opts.out) {
+        fs.writeFileSync(opts.out, JSON.stringify(result, null, 2), 'utf8')
+        console.log(`已寫入 ${path.resolve(opts.out)}`)
+      }
     }
   )
 

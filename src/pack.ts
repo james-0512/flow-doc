@@ -1,6 +1,5 @@
-import fs from 'node:fs'
-import path from 'node:path'
 import { slugify } from './paths.js'
+import { readLines } from './source.js'
 import type { AsyncLink, ChainNode, FlowChain, SideEffect, TraceResult } from './types.js'
 
 export interface PackOptions {
@@ -29,13 +28,6 @@ const SINK_LABEL: Record<SideEffect['kind'], string> = {
   BROADCAST: '跨分頁',
   STORE: 'Store',
   OPAQUE: '共用層'
-}
-
-function readLines(repoRoot: string, file: string, start: number, end: number): string | null {
-  const abs = path.join(repoRoot, file)
-  if (!fs.existsSync(abs)) return null
-  const lines = fs.readFileSync(abs, 'utf8').split('\n')
-  return lines.slice(start - 1, end).join('\n')
 }
 
 /** 讀寫標記只對 API 與 storage 有意義；store action 呼叫或導頁標成「讀取」會誤導。 */

@@ -17,8 +17,9 @@ import { fileURLToPath } from 'node:url'
  * 版本紀錄：
  * - 1：初版。entry ID 為 `檔案:行號:標籤:事件`
  * - 2：entry ID 改為語意錨點（不含行號），新增 legacyEntryId 供一次性遷移
+ * - 3：每條鏈新增 sourceHash，供 diff 偵測「結構沒變但主體改了」
  */
-export const REPRESENTATION_VERSION = 2
+export const REPRESENTATION_VERSION = 3
 
 let cachedVersion: string | null = null
 

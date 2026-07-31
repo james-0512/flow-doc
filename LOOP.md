@@ -29,19 +29,24 @@ flowchart TD
     MG -.->|"新 baseline 生效"| T
 ```
 
-## diff 五分類——調度核心
+## diff 五分類——調度核心（**已實作**，見 DECISIONS D11）
 
-「鏈結構」= 節點序列＋副作用清單＋跨元件接合，**不含行號**。
+依序比三件事，順序有意義：**結構簽章**（不含行號）→ **`sourceHash`**（鏈上函式主體）
+→ **行號簽章**。
 
-| 分類 | 判定（語意 ID 配對後比較） | 動作 | 成本 |
+| 分類 | 判定 | 動作 | 成本 |
 |---|---|---|---|
-| unchanged | 鏈結構同、行號同 | 不動 | 0 |
-| moved | 鏈結構同、只有行號漂 | `reanchor` 機械改寫敘述裡的 `:N` 引用 | 0 |
-| changed | 副作用／步驟／emit 接合變了 | LLM 重寫該章 → verify | token |
-| added | 新 entry 成為流程 | LLM 新寫 → verify | token |
+| unchanged | 三者全同 | 不動 | 0 |
+| moved | 結構與主體同，只有行號漂 | `reanchor` 機械改寫敘述裡的 `:N` 引用 | 0 |
+| changed | 結構變了，**或**結構同但主體改了 | LLM 重寫該章 → verify | token |
+| added | 新 entry 成為流程 | 落在已維護的域才補寫 | token |
 | removed | entry 消失 | 歸檔下架、列入變更頁 | 0 |
 
-moved 佔日常 commit 的絕大多數——這是平常一圈幾乎不花 token 的原因。
+`sourceHash` 不是保險而是必要：主體改了但呼叫結構沒變（判斷條件反過來）時，
+結構簽章完全相同。實測真實區間的三條 changed **全部**屬於這一類。
+
+**實測經濟性**（mPHR 四個 commit）：79 條行號漂移、3 條主體變更 →
+**33 章機械改寫（0 token）、1 章需 LLM**。「多數輪次不花 token」這個假設成立。
 
 **總覽的二層連動**：域內任何 changed / added / removed → 該域篇章總覽重寫；
 任一域總覽變了 → 全站總覽重寫。token 成本止於此。
@@ -170,12 +175,16 @@ build 到暫存目錄再原子換版，否則使用者會讀到半套站。
 **兩組憑證進 secret**：git identity＋push 憑證（commit 那步）、LLM API key（narrate 那步）。
 這是容器化真正新增的複雜度。
 
+**generated 檔必須存在——這條會讓第一輪滿江紅。** `src/components.d.ts`
+由 unplugin-vue-components 產生且不進版控，乾淨 checkout（CI／容器／`git worktree`）
+不會有它。少了它，全域註冊元件的標籤全部解析不到檔案——實測同一個 commit 的流程數
+從 901 變成 940。分析器現在會警告，但容器仍必須**先跑目標的 codegen**，
+或確保 checkout 含 generated 檔。
+
 **node_modules 要一致。** 分析器不需要目標的依賴（`createAnalysisProgram` 刻意不用目標
 tsconfig，模組解析靠 `baseUrl`＋alias；`fixtures/mini-vue` 完全沒有 node_modules 也能追完整條鏈）。
-但**有裝與沒裝，「解析不到定義」的計數會不同**，那個數字寫在封包標頭裡，會造成
-packet diff → 觸發不必要的重寫。流程分類不受影響，但 diff 會有雜訊。
-現有 baseline 是在有 node_modules 的環境產生的，容器直接掛整個目標 repo 最省事；
-若改走乾淨 checkout，記得重新產一次 baseline 當新起點。
+有裝與沒裝會讓「解析不到定義」的計數不同，那個數字寫在封包標頭裡——結構簽章刻意
+不收它，所以不會誤判成 changed，但封包內容仍會有差異。容器直接掛整個目標 repo 最省事。
 
 ### 一圈的實際順序
 
@@ -217,18 +226,16 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 ## 待建元件與順序
 
 現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
-與設定解析、每個目標自帶設定的手冊 repo（D9）、**語意 ID 與 baseline metadata（D10）**。
-缺四件，依序：
+與設定解析、每個目標自帶設定的手冊 repo（D9）、語意 ID 與 baseline metadata（D10）、
+**`flow-doc diff` 五分類＋熔斷＋版本比對（D11）**。缺三件，依序：
 
-1. `flow-doc diff`——五分類＋熔斷判定＋analyzer 版本比對＋git rename 偵測。
-   **必須比「新 chains vs 舊 baseline chains」，不可比「chains vs manuals」**：
-   901 條流程只有 226 條寫了敘述，拿 manuals 當基準會把 675 條沒寫過的判成 added，
-   第一輪就想寫 675 章、直接撞熔斷。閉環的職責是**維護已寫的敘述，不主動補寫沒寫的**——
-   補寫是獨立的人為工作。
-2. `flow-doc reanchor`——moved 章節的行號機械改寫
-3. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
-4. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
+1. `flow-doc reanchor`——moved 章節的行號機械改寫。diff 已能精確指出哪些章屬於這類
+2. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
+3. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
    （每個目標一條 pipeline 實例）
+
+diff 尚未做 **git rename 偵測**：檔案搬移目前會被判成 removed＋added。
+在 reanchor 之前補上即可。
 
 ## 成本輪廓與殘餘風險
 

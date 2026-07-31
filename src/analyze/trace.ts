@@ -3,6 +3,7 @@ import { Node, SyntaxKind } from 'ts-morph'
 import type { CallExpression, SourceFile } from 'ts-morph'
 import { classifyPath } from '../config.js'
 import type { AnalyzerConfig } from '../config.js'
+import { sourceSignature } from '../signature.js'
 import { packageVersion, readTargetRevision, REPRESENTATION_VERSION } from '../version.js'
 import type { Workspace } from '../workspace.js'
 import type {
@@ -81,6 +82,12 @@ export function createTracer(ws: Workspace, scan: EntryScanResult) {
     const bucket = listenerIndex.get(key)
     if (bucket) bucket.push(edge)
     else listenerIndex.set(key, [edge])
+  }
+  // 同一個事件的多個 parent listener 要有固定順序：它決定封包裡的呈現順序，
+  // 更決定超過 maxListeners 時**哪幾個**被展開。順序浮動 = 同一份程式碼跑兩次
+  // 得到不同結果，閉環會把它誤判成程式變更。
+  for (const bucket of listenerIndex.values()) {
+    bucket.sort((a, b) => a.loc.file.localeCompare(b.loc.file) || a.loc.line - b.loc.line)
   }
 
   const ctx: SinkContext = { swagger, locOf }
@@ -586,7 +593,8 @@ function buildCrosscutChain(
     maxDepth: state.maxDepthSeen,
     flowKind: classifyFlow(effects),
     isFlow: true,
-    unresolvedCalls: state.unresolved
+    unresolvedCalls: state.unresolved,
+    sourceHash: ''
   }
 }
 
@@ -681,11 +689,17 @@ export function traceEntries(
       maxDepth: state.maxDepthSeen,
       flowKind,
       isFlow: flowKind !== 'none',
-      unresolvedCalls: state.unresolved
+      unresolvedCalls: state.unresolved,
+      sourceHash: ''
     })
   }
 
   const crosscut = traceCrosscut(t, shared, opts)
+
+  // 原始碼簽章要在分析當下算——diff 只有兩份 JSON，拿不到 baseline 那個 commit 的原始碼
+  for (const chain of [...chains, ...crosscut]) {
+    chain.sourceHash = sourceSignature(ws.config.repoRoot, chain)
+  }
 
   return {
     repoRoot: ws.config.repoRoot,
