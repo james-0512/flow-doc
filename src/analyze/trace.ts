@@ -704,7 +704,7 @@ export function traceEntries(
   return {
     repoRoot: ws.config.repoRoot,
     generatedAt: new Date().toISOString(),
-    analyzer: { representation: REPRESENTATION_VERSION, version: packageVersion() },
+    analyzer: { representation: REPRESENTATION_VERSION, version: packageVersion(), platform: process.platform },
     target: readTargetRevision(ws.config.repoRoot),
     chains,
     crosscut,

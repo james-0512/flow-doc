@@ -1,4 +1,9 @@
-import type { ChainNode, FlowChain } from './types.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { applyRenames, type DiffResult } from './diff.js'
+import { manualFileFor, type ManualIndex } from './manuals.js'
+import { structureSignature } from './signature.js'
+import type { ChainNode, FlowChain, TraceResult } from './types.js'
 
 /** 一段可對應的區間：舊檔案的 `[start, end]` 行 → 新檔案的起始行。 */
 interface Span {
@@ -125,4 +130,80 @@ export function reanchorManual(markdown: string, map: LineMap): ReanchorResult {
     return `\`${start.file}:${start.line}-${endLine}\``
   })
   return { text, rewritten, unmapped }
+}
+
+export interface ReanchorRunSummary {
+  /** 實際被改寫的敘述檔（相對 manualsDir） */
+  manualsChanged: string[]
+  refsRewritten: number
+  /** `檔案 → 引用` 形式的未對照清單 */
+  unmapped: string[]
+  /** moved 且有敘述的流程數 */
+  movedWithManual: number
+}
+
+/**
+ * 對 diff 判為 moved 的所有敘述做機械改寫。`reanchor` 指令與閉環的 `loop` 共用。
+ *
+ * 一份敘述涵蓋的不只一條鏈：`covers:` 宣告的、以及共用同一個 handler 的其他觸發點
+ * （pack 就是依 handler 合併封包的，敘述的觸發表會列出各觸發點的位置）。
+ * 只從 moved 的那幾條建表的話，其餘鏈的引用會查不到而被誤報成「對照不到」——
+ * 它們其實只是不需要改。所以以檔案為單位收齊所有相關的鏈。
+ */
+export function reanchorAll(
+  baseline: TraceResult,
+  current: TraceResult,
+  diff: DiffResult,
+  index: ManualIndex,
+  manualsDir: string,
+  renames: Map<string, string>,
+  options: { dryRun?: boolean } = {}
+): ReanchorRunSummary {
+  // baseline 側套用改名後才與現況同一個鍵空間，跟 diff 的配對方式一致
+  const oldById = new Map(
+    [...baseline.chains, ...baseline.crosscut].map(c => [applyRenames(c.entryId, renames), c])
+  )
+  const newById = new Map([...current.chains, ...current.crosscut].map(c => [c.entryId, c]))
+
+  const fileOfChain = new Map<string, string>()
+  const handlerFile = new Map<string, string>()
+  for (const c of newById.values()) {
+    const file = manualFileFor(index, c.entryId)
+    if (!file) continue
+    fileOfChain.set(c.entryId, file)
+    if (c.root) handlerFile.set(`${c.root.loc.file}:${c.root.loc.line}`, file)
+  }
+  for (const c of newById.values()) {
+    if (fileOfChain.has(c.entryId) || !c.root) continue
+    const file = handlerFile.get(`${c.root.loc.file}:${c.root.loc.line}`)
+    if (file) fileOfChain.set(c.entryId, file)
+  }
+
+  const needsWork = new Set(diff.work.reanchor.map(id => fileOfChain.get(id)).filter(Boolean) as string[])
+  const mapsByFile = new Map<string, LineMap[]>()
+  for (const [entryId, file] of fileOfChain) {
+    if (!needsWork.has(file)) continue
+    const next = newById.get(entryId)
+    const prev = oldById.get(entryId)
+    // 結構不同的鏈不可以拿來建對照表：對錯位置比不改更糟
+    if (!next || !prev || structureSignature(prev) !== structureSignature(next)) continue
+    mapsByFile.set(file, [...(mapsByFile.get(file) ?? []), buildLineMap(prev, next)])
+  }
+
+  const manualsChanged: string[] = []
+  let refsRewritten = 0
+  const unmapped: string[] = []
+  for (const [file, maps] of mapsByFile) {
+    const abs = path.join(manualsDir, file)
+    if (!fs.existsSync(abs)) continue
+    const before = fs.readFileSync(abs, 'utf8')
+    const out = reanchorManual(before, mergeLineMaps(maps))
+    refsRewritten += out.rewritten
+    for (const u of out.unmapped) unmapped.push(`${file} → ${u}`)
+    if (out.text === before) continue
+    manualsChanged.push(file)
+    if (!options.dryRun) fs.writeFileSync(abs, out.text, 'utf8')
+  }
+
+  return { manualsChanged, refsRewritten, unmapped, movedWithManual: diff.work.reanchor.length }
 }

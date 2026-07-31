@@ -288,6 +288,12 @@ export interface TraceResult {
     representation: number
     /** package.json 的版本，資訊用；判斷依據是 representation */
     version: string
+    /**
+     * 產生分析的作業系統（process.platform）。模組解析對環境敏感——實測 Windows 的
+     * pnpm junction 掛進 Linux 容器會斷，pinia 型別解析不到，941/1894 條鏈的樹形改變。
+     * 跨平台 diff 出現大量 changed 時，先懷疑環境而不是程式。選填：舊 baseline 沒有。
+     */
+    platform?: string
   }
   /**
    * 目標 repo 的 commit 與髒污狀態。閉環醒來後先比 commit，沒動就直接退出——

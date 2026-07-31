@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Complete } from './llm.js'
-import { stripFrontmatter } from './manuals.js'
+import { describeApiError, type Complete } from './llm.js'
+import { manualFileFor, stripFrontmatter, type ManualIndex } from './manuals.js'
+import { slugify } from './paths.js'
+import type { TraceResult } from './types.js'
 import { verifyManual, type Violation } from './verify.js'
 
 /**
@@ -164,4 +166,112 @@ export function withExistingFrontmatter(existing: string | null, body: string): 
   if (!existing) return `${body}\n`
   const frontmatter = /^---\n[\s\S]*?\n---\n*/.exec(existing)
   return frontmatter ? `${frontmatter[0]}${body}\n` : `${body}\n`
+}
+
+/**
+ * 一批章節的生成結果。**每個目標必須落在 written／degraded／skipped 其中一格**——
+ * 少一格就是靜默截斷，上層會以為那章處理過了，待補佇列也不會接住它。
+ */
+export interface NarrateRunSummary {
+  written: { entryId: string; file: string }[]
+  degraded: { entryId: string; detail: string; violations: Violation[] }[]
+  skipped: { entryId: string; detail: string }[]
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number }
+  /** API 層失敗（憑證、額度、網路）。已寫入的保留，未處理的落在 skipped */
+  aborted?: string
+}
+
+export interface NarrateRunProgress {
+  start(slug: string): void
+  done(line: string, violations?: Violation[]): void
+  skip?(slug: string, detail: string): void
+}
+
+/**
+ * 逐章生成敘述並寫入手冊目錄。`narrate` 指令與閉環的 `loop` 共用。
+ *
+ * 驗證不過就不寫入——降級成「分析已更新、敘述待補」，site 本來就容忍此狀態。
+ * API 層錯誤不重試也不吞掉：已寫入的章節保留（中途失敗不該讓前面成功的白做），
+ * 其餘目標標為 skipped 並帶上原因，由呼叫端決定進佇列或直接報錯。
+ */
+export async function narrateTargets(
+  targets: string[],
+  ctx: { current: TraceResult; index: ManualIndex; manualsDir: string; packetsDir: string; system: string },
+  complete: Complete,
+  options: { retries: number; limit?: number; progress?: NarrateRunProgress }
+): Promise<NarrateRunSummary> {
+  const summary: NarrateRunSummary = {
+    written: [],
+    degraded: [],
+    skipped: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  }
+  const byId = new Map([...ctx.current.chains, ...ctx.current.crosscut].map(c => [c.entryId, c]))
+
+  // 上限必須看得見。靜默截斷會讓人以為「全部寫完了」
+  const todo = options.limit != null ? targets.slice(0, options.limit) : targets
+  for (const entryId of targets.slice(todo.length)) {
+    summary.skipped.push({ entryId, detail: `--limit ${options.limit} 略過，下輪再跑` })
+  }
+
+  for (let i = 0; i < todo.length; i++) {
+    const entryId = todo[i]!
+    const chain = byId.get(entryId)
+    const slug = slugify(entryId)
+    if (!chain) {
+      summary.skipped.push({ entryId, detail: '不在本次分析結果中' })
+      options.progress?.skip?.(slug, '不在本次分析結果中')
+      continue
+    }
+    const packetFile = path.join(ctx.packetsDir, `${slug}.md`)
+    if (!fs.existsSync(packetFile)) {
+      summary.skipped.push({ entryId, detail: '找不到封包' })
+      options.progress?.skip?.(slug, '找不到封包')
+      continue
+    }
+    const packet = fs.readFileSync(packetFile, 'utf8')
+
+    const target = manualFileFor(ctx.index, entryId) ?? `${slug}.md`
+    const abs = path.join(ctx.manualsDir, target)
+    const existing = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null
+
+    options.progress?.start(slug)
+    let outcome: NarrateOutcome
+    try {
+      outcome = await narrateChapter(
+        { packet, repoRoot: ctx.current.repoRoot, system: ctx.system },
+        complete,
+        { retries: options.retries }
+      )
+    } catch (err) {
+      // API 層失敗：同一輪剩下的章節不再嘗試（多半是同一個原因），全部交代下落
+      summary.aborted = describeApiError(err)
+      options.progress?.done(`中斷 — ${summary.aborted.split('\n')[0]}`)
+      for (const rest of todo.slice(i)) {
+        summary.skipped.push({ entryId: rest, detail: `API 失敗：${summary.aborted}` })
+      }
+      break
+    }
+    summary.usage.input += outcome.usage.input
+    summary.usage.output += outcome.usage.output
+    summary.usage.cacheRead += outcome.usage.cacheRead
+    summary.usage.cacheWrite += outcome.usage.cacheWrite
+
+    if (outcome.ok) {
+      fs.writeFileSync(abs, withExistingFrontmatter(existing, outcome.text), 'utf8')
+      summary.written.push({ entryId, file: target })
+      options.progress?.done(`通過（第 ${outcome.attempts} 次）`)
+      continue
+    }
+    // 驗證不過就不寫入——寧可少一章，也不要讓引用造假的敘述進手冊
+    const why =
+      outcome.stopReason === 'max_tokens'
+        ? '輸出被 max_tokens 截斷（調高 --max-tokens）'
+        : outcome.stopReason === 'refusal'
+          ? '被安全分類器擋下'
+          : `${outcome.attempts} 次都沒通過驗證（${outcome.violations.length} 處問題）`
+    summary.degraded.push({ entryId, detail: why, violations: outcome.violations })
+    options.progress?.done(`未寫入 — ${why}`, outcome.violations)
+  }
+  return summary
 }

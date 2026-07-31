@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { slugify } from './paths.js'
 import { readLines } from './source.js'
 import type { AsyncLink, ChainNode, FlowChain, SideEffect, TraceResult } from './types.js'
@@ -400,4 +402,89 @@ function triggerRank(trigger: string): number {
  */
 export function packFileName(chain: FlowChain): string {
   return `${slugify(chain.entryId)}.md`
+}
+
+export interface PackRunOptions {
+  outDir: string
+  domain?: string
+  flow?: string
+  /** 連非流程（純查詢／UI 操作）也打包 */
+  all?: boolean
+  maxSourceChars?: number
+  /** 已知限制清單，附在總覽末尾 */
+  limitationsFile?: string
+  /** 每個觸發點各出一份封包，不依 handler 合併 */
+  perTrigger?: boolean
+}
+
+export interface PackRunSummary {
+  packets: number
+  removedOld: number
+  totalChars: number
+  mergedTriggers: number
+  chainsCovered: number
+  crosscut: number
+  overviews: number
+  limitationsFound: boolean
+}
+
+/**
+ * 把整份分析結果寫成封包目錄。`pack` 指令與閉環的 `loop` 共用這一份——
+ * 兩邊各寫一次輸出邏輯的話，「先清舊檔」這類防孤兒規則遲早只剩一邊有。
+ */
+export function writePackets(result: TraceResult, options: PackRunOptions): PackRunSummary {
+  let chains = result.chains.filter(c => c.root != null)
+  if (!options.all) chains = chains.filter(c => c.isFlow)
+  if (options.domain) chains = chains.filter(c => c.domain === options.domain)
+  if (options.flow) chains = chains.filter(c => c.entryId.includes(options.flow!))
+
+  fs.mkdirSync(options.outDir, { recursive: true })
+  // 先清掉舊封包。不清的話流程消失或改名後會留下孤兒檔案，
+  // 閉環的 diff 與 PR 審查都會被這些永遠不再更新的殘骸混淆
+  let removedOld = 0
+  for (const f of fs.readdirSync(options.outDir)) {
+    if (!f.endsWith('.md')) continue
+    fs.rmSync(path.join(options.outDir, f))
+    removedOld++
+  }
+
+  const packOpts = { maxSourceChars: options.maxSourceChars ?? defaultPackOptions.maxSourceChars }
+  let totalChars = 0
+  let mergedTriggers = 0
+  // 同一個 handler 只出一份封包，其餘觸發點列在封包內
+  const groups = options.perTrigger ? new Map(chains.map(c => [c, [] as FlowChain[]])) : groupByHandler(chains)
+  for (const chain of result.crosscut) {
+    const md = packFlow(result.repoRoot, chain, packOpts)
+    if (md) {
+      fs.writeFileSync(path.join(options.outDir, packFileName(chain)), md, 'utf8')
+      totalChars += md.length
+    }
+  }
+  const peers = findPeers([...groups.keys()])
+  for (const [chain, siblings] of groups) {
+    const md = packFlow(result.repoRoot, chain, packOpts, siblings, peers.get(chain) ?? [])
+    if (!md) continue
+    fs.writeFileSync(path.join(options.outDir, packFileName(chain)), md, 'utf8')
+    totalChars += md.length
+    mergedTriggers += siblings.length
+  }
+
+  // 限制清單要跟著目錄走，讀手冊的人才知道「哪些東西手冊不會說」
+  const limitations =
+    options.limitationsFile && fs.existsSync(options.limitationsFile)
+      ? fs.readFileSync(options.limitationsFile, 'utf8')
+      : undefined
+  const overviews = packOverviews(result, limitations)
+  for (const [name, md] of overviews) fs.writeFileSync(path.join(options.outDir, name), md, 'utf8')
+
+  return {
+    packets: groups.size + result.crosscut.length,
+    removedOld,
+    totalChars,
+    mergedTriggers,
+    chainsCovered: chains.length,
+    crosscut: result.crosscut.length,
+    overviews: overviews.size,
+    limitationsFound: limitations !== undefined
+  }
 }
