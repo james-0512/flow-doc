@@ -282,11 +282,13 @@ program
         for (const f of fs.readdirSync(opts.manuals)) {
           if (!f.endsWith('.md')) continue
           const md = fs.readFileSync(path.join(opts.manuals, f), 'utf8')
-          byslug.set(f.replace(/\.md$/, ''), md)
+          // frontmatter 只給 covers: 解析用，注入頁面時要剝掉，不然會渲染成內文
+          const body = md.replace(/^---\n[\s\S]*?\n---\n*/, '')
+          byslug.set(f.replace(/\.md$/, ''), body)
           // 一份敘述可用 frontmatter 的 covers: 明確宣告它涵蓋哪些流程。
           // 副作用相同的多個控件（篩選、分頁、查詢鈕）其實是同一件事，
           // 但不該靠猜——由作者宣告，可稽核。
-          for (const id of parseCovers(md)) byCovers.set(id, md)
+          for (const id of parseCovers(md)) byCovers.set(id, body)
         }
         const all = [...result.crosscut, ...result.chains]
         for (const c of all) {
