@@ -43,14 +43,36 @@ export interface AnalyzerConfig {
 }
 
 /**
- * Vue 專案的預設設定，直接編碼 grill 階段定案的四個決策：
+ * 設定檔（`flow-doc.config.json`）的形狀：AnalyzerConfig 的部分覆寫，外加 `target`。
  *
- * 1. 只追業務層目錄（views / components / layouts / stores / composables / api / router）
- * 2. `components/Utils/` 與 `utils/functions/` 記錄但不展開——手冊不需要描述 formatDate
- * 3. generated code 以「路徑」判定為 STOP。plan.md 原本只擋 node_modules，
- *    但 swaggerApi.ts 有 9.5 萬行且位於 src/ 內，不擋會讓 DFS 直接爆掉
- * 4. 純函式模組中具業務語意者（權限判斷）逐檔覆寫回 FOLLOW——
- *    checkPermissions 會改變流程走向，那是業務邏輯不是工具函式
+ * 陣列欄位是**整段取代**而非合併——設定檔寫了 `follow` 就要列完整清單。
+ * 合併語意會讓「移除一條預設規則」變得不可能表達。
+ */
+export interface FlowDocConfigFile extends Partial<Omit<AnalyzerConfig, 'repoRoot'>> {
+  /** 目標 repo 路徑，**相對於本設定檔所在目錄**解析（也可給絕對路徑） */
+  target?: string
+}
+
+export const CONFIG_FILE_NAME = 'flow-doc.config.json'
+
+/**
+ * 讀設定檔並剝掉底線開頭的鍵。JSON 沒有註解，而這份設定的每個欄位都需要解釋
+ * 「為什麼是這些路徑」——`"_stop": "generated code 要放這裡，否則 DFS 會爆"`
+ * 這種就地說明比另開一份文件有用得多。
+ */
+function readConfigFile(file: string): FlowDocConfigFile {
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+  const entries = Object.entries(raw).filter(([key]) => !key.startsWith('_'))
+  return Object.fromEntries(entries) as FlowDocConfigFile
+}
+
+/**
+ * 通用 Vue 3 專案預設值——只放**慣例**，不放任何單一專案的實情。
+ *
+ * 每個目標專屬的部分（哪些目錄不展開、generated code 在哪、有哪些橫切邏輯、
+ * 額外的 alias）一律寫在該目標手冊 repo 的 `flow-doc.config.json`。
+ * 混在這裡的話，下一個目標會默默繼承上一個目標的假設——錯了也不會報錯，
+ * 只會讓手冊沉默地漏或錯。範本見 `templates/flow-doc.config.example.json`。
  */
 export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
   return {
@@ -61,35 +83,22 @@ export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
       'src/components/',
       'src/layouts/',
       'src/stores/',
+      'src/composables/',
       'src/utils/composables/',
-      'src/utils/service/',
       'src/api/',
-      'src/router/',
-      'src/directives/'
+      'src/router/'
     ],
-    opaque: ['src/components/Utils/', 'src/utils/functions/', 'src/utils/data/', 'src/i18n/'],
-    stop: ['src/plugins/swaggerTypescriptApi/', 'src/types/', 'src/assets/', 'src/data/'],
-    followOverrides: ['src/utils/functions/execute.ts'],
+    opaque: [],
+    stop: ['src/types/', 'src/assets/'],
+    followOverrides: [],
     globalComponentsDts: 'src/components.d.ts',
     routerDir: 'src/router',
-    aliases: { '@/': 'src/', '@config/': '' },
-    crosscut: [
-      {
-        file: 'src/router/guards',
-        symbolPattern: '^create[A-Za-z]+Guard$',
-        unwrapReturn: true,
-        label: '路由守衛'
-      },
-      { file: 'src/utils/service/api.service.ts', label: 'API 請求／回應攔截器' }
-    ],
+    aliases: { '@/': 'src/' },
+    crosscut: [],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
       '**/out/**',
-      '**/coverage-report/**',
-      '**/build-report/**',
-      '**/playwright-report/**',
-      '**/copilot-demo/**',
       '**/*.spec.ts',
       '**/*.test.ts',
       '**/*.d.ts'
@@ -100,10 +109,85 @@ export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
 /** 讀取 repo 根的 flow-doc.config.json（若存在）並覆蓋預設值。 */
 export function loadConfig(repoRoot: string, configPath?: string): AnalyzerConfig {
   const base = defaultVueConfig(repoRoot)
-  const file = configPath ?? path.join(repoRoot, 'flow-doc.config.json')
+  const file = configPath ?? path.join(repoRoot, CONFIG_FILE_NAME)
   if (!fs.existsSync(file)) return base
-  const overrides = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<AnalyzerConfig>
+  const { target: _target, ...overrides } = readConfigFile(file)
   return { ...base, ...overrides, repoRoot }
+}
+
+export interface ResolvedConfig {
+  config: AnalyzerConfig
+  /** 實際採用的設定檔，null 代表全用預設值 */
+  configFile: string | null
+  /** 目標 repo 的來源，回報給使用者看，出錯時才知道該改哪裡 */
+  targetSource: 'argument' | 'env' | 'config'
+}
+
+/**
+ * 決定「分析哪個 repo、用哪份設定」。
+ *
+ * 手冊與工具分家後，日常操作是 `cd <手冊 repo>/<目標>` 然後裸命令跑 CLI——
+ * 設定檔就在 CWD，目標 repo 由設定檔的 `target` 指出去。所以：
+ *
+ * - **設定檔**：`--config` > CWD > 目標 repo 根（單一 repo 時期的舊佈局，仍支援）
+ * - **目標 repo**：命令列參數 > `FLOW_DOC_TARGET` 環境變數 > 設定檔的 `target`
+ *
+ * `target` 相對於設定檔目錄而非 CWD，手冊 repo 才能整個搬家不用改設定；
+ * 環境變數則是給 CI 用的——checkout 路徑每次都不同，但不該汙染版控中的設定檔。
+ */
+export function resolveConfig(opts: {
+  repoArg?: string
+  configPath?: string
+  cwd?: string
+}): ResolvedConfig {
+  const cwd = opts.cwd ?? process.cwd()
+
+  let configFile: string | null = null
+  if (opts.configPath) {
+    configFile = path.resolve(cwd, opts.configPath)
+    if (!fs.existsSync(configFile)) throw new Error(`找不到設定檔：${configFile}`)
+  } else {
+    const atCwd = path.join(cwd, CONFIG_FILE_NAME)
+    if (fs.existsSync(atCwd)) configFile = atCwd
+    else if (opts.repoArg) {
+      const atRepo = path.join(path.resolve(cwd, opts.repoArg), CONFIG_FILE_NAME)
+      if (fs.existsSync(atRepo)) configFile = atRepo
+    }
+  }
+
+  const file: FlowDocConfigFile = configFile ? readConfigFile(configFile) : {}
+
+  const envTarget = process.env.FLOW_DOC_TARGET?.trim()
+  let repoRoot: string
+  let targetSource: ResolvedConfig['targetSource']
+  if (opts.repoArg) {
+    repoRoot = path.resolve(cwd, opts.repoArg)
+    targetSource = 'argument'
+  } else if (envTarget) {
+    repoRoot = path.resolve(cwd, envTarget)
+    targetSource = 'env'
+  } else if (file.target && configFile) {
+    repoRoot = path.resolve(path.dirname(configFile), file.target)
+    targetSource = 'config'
+  } else {
+    throw new Error(
+      `不知道要分析哪個 repo。三選一：\n` +
+        `  1. 命令列給路徑：flow-doc trace <repo>\n` +
+        `  2. 在手冊 repo 的目標目錄下執行，且其 ${CONFIG_FILE_NAME} 有 "target" 欄位\n` +
+        `  3. 設環境變數 FLOW_DOC_TARGET（CI 用）`
+    )
+  }
+
+  if (!fs.existsSync(repoRoot)) {
+    throw new Error(`找不到目標 repo：${repoRoot}（來源：${targetSource}）`)
+  }
+
+  const { target: _target, ...overrides } = file
+  return {
+    config: { ...defaultVueConfig(repoRoot), ...overrides, repoRoot },
+    configFile,
+    targetSource
+  }
 }
 
 /**

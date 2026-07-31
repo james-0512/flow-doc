@@ -116,6 +116,37 @@ axios 攔截器（請求／回應 × 成功／錯誤四個回呼）與 `buildGua
 不在每條流程展開的理由：那會讓 902 條流程每一條都重複描述一次 token 注入、
 語言標頭、載入狀態、MFA challenge 與 token 續期，把真正的業務內容淹沒。
 
+## D9 — 工具與資料分家：每個目標一個手冊 repo
+
+flow-doc 是工具，不綁定單一目標；`C:\project` 下有二十幾個前端 repo，mPHR 只是第一個。
+分析產出與 manuals 原本放在工具 repo 根目錄，那是單目標時期的便宜行事——多目標會互相
+覆蓋，而且手冊的版本歷史會跟工具的版本歷史攪在一起，「這章敘述為什麼變了」分不出是
+程式行為變了還是分析規則變了。
+
+- **flow-doc**：`src/`、`fixtures/`、`templates/`、flow-manual skill（源）、plan／DECISIONS／LOOP
+- **`flow-manuals/<目標名>/`**：`flow-doc.config.json`、baseline `flow-chains.json`、
+  `packets/`、`manuals/`、`LIMITATIONS.md`、生成的 `site/`
+
+配套三件：
+
+1. **`defaultVueConfig` 只留 Vue 慣例**，mPHR 專屬的四項（swagger STOP、Utils/functions
+   opaque、`utils/service` follow、`@config/` alias、兩條 crosscut）全搬進其設定檔。
+   留在預設值裡的話，下一個目標會默默繼承上一個目標的假設——**錯了不會報錯，
+   只會讓手冊沉默地漏或錯**。fixture 同理，改用自己的 `flow-doc.config.json`
+   （順帶讓測試真的走過設定檔路徑）。
+2. **設定解析改成 CWD 優先**：設定檔 `--config` > CWD > 目標 repo 根；目標 repo
+   命令列 > `FLOW_DOC_TARGET` > 設定檔 `target`（相對設定檔目錄，手冊 repo 可整個搬家）。
+   `[repo]` 參數變 optional。
+3. **設定檔支援底線註解鍵**（`"_stop": "generated code 要放這裡…"`），讀取時剝除。
+   JSON 沒有註解，而這份設定每個欄位都需要解釋「為什麼是這些路徑」。
+
+驗證方式：拆前用舊程式碼產 baseline，拆後從新家跑 trace，兩份 `flow-chains.json`
+逐條比對——1894 條鏈、901 條流程、16 條橫切**完全相同，零差異**。分析器的確定性
+在這裡直接變成重構的安全網。
+
+順帶發現：README 與 LIMITATIONS 的數字（902 流程／339 寫入／5 條全域前置）**早已過時**，
+舊程式碼跑出來就是 901／305／16。實例數字放在工具 repo 裡沒人會去對，這正是分家的另一個理由。
+
 ---
 
 ## 尚未定案

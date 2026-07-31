@@ -5,19 +5,26 @@
 不同於元件相依性文件回答「這個模組是什麼」，這個工具回答**「使用者做了 X，系統依序發生了什麼」**。
 核心能力是 call chain tracing，不是 dependency graph。
 
-目標專案是 [mPHR_Frontend](file:///C:/project/mPHR_Frontend)（Vue 3 + TS + Pinia）。
-設計決策與其理由記在 [DECISIONS.md](DECISIONS.md)，分析看不到的東西記在 [LIMITATIONS.md](LIMITATIONS.md)，
-閉環（手冊自動跟著 main 更新）的設計記在 [LOOP.md](LOOP.md)（尚未實作）。
+**這裡只有工具。** 每個目標 repo 的設定、分析產出與手冊敘述住在該目標的手冊 repo
+（`flow-manuals/<目標名>/`）——分析器改版與手冊內容改版是兩件事，版本歷史混在一起的話，
+「這章敘述為什麼變了」會分不出是程式行為變了還是分析規則變了。
+第一個目標是 mPHR_Frontend，資料在 `C:\project\flow-manuals\mPHR_Frontend`。
+
+設計決策與其理由記在 [DECISIONS.md](DECISIONS.md)，閉環（手冊自動跟著 main 更新）的
+設計記在 [LOOP.md](LOOP.md)（尚未實作）。新目標從 [templates/](templates/) 起步。
 
 ## 管線
 
-```bash
-pnpm dev trace C:/project/mPHR_Frontend    # 分析 → flow-chains.json
-```
+一次性：`pnpm build && pnpm link --global`（若 pnpm 沒設過全域 bin 目錄，先跑一次
+`pnpm setup`——它會改你的 PATH）。之後在手冊 repo 的目標目錄下裸命令即可：
 
 ```bash
-pnpm dev site --manuals manuals --title "業務流程手冊"    # → site/
+cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 ```
+
+不必給目標 repo 路徑：`flow-doc.config.json` 的 `target` 欄位指出去（相對設定檔目錄解析，
+所以手冊 repo 整個搬家不用改設定）。優先序是**命令列參數 > `FLOW_DOC_TARGET` 環境變數 >
+設定檔 `target`**；環境變數是留給 CI 的——checkout 路徑每次不同，但不該汙染版控中的設定檔。
 
 五個指令，前四個是確定性的、可單元測試；只有手冊敘述那一步用 LLM。
 
@@ -30,6 +37,8 @@ pnpm dev site --manuals manuals --title "業務流程手冊"    # → site/
 | `verify` | 檢查生成的敘述沒有幻覺 |
 
 撰寫敘述用 `.claude/skills/flow-manual`：讀 `packets/*.md`，寫進 `manuals/<entryId slug>.md`。
+這份 skill 是「源」，各手冊 repo 的 `.claude/skills/` 有一份複本；改規則只改這裡，
+再依 [LOOP.md](LOOP.md) 的升版圈同步過去。
 
 ## 預覽站台
 
@@ -40,14 +49,11 @@ pnpm dev site --manuals manuals --title "業務流程手冊"    # → site/
 cd site && pnpm install && pnpm dev
 ```
 
-## 目前規模
+## 規模參考
 
-對 mPHR_Frontend（753 SFC / 371 TS / 196k 行）：
-
-- **902 條業務流程**：寫入型 339、查詢型 563
-- **510 支後端端點**，可反查每支被哪些流程使用
-- **5 條全域前置**：axios 攔截器與路由守衛管線
-- 全 repo 分析約 14 秒
+對 mPHR_Frontend（753 SFC / 371 TS / 196k 行）：901 條業務流程、503 支後端端點
+（可反查每支被哪些流程使用）、16 條全域前置，全 repo 分析約 13 秒。
+最新數字以該手冊 repo 的 README 為準——這裡的只是量級參考。
 
 ## 為什麼可信
 

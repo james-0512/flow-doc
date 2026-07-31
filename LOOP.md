@@ -68,32 +68,37 @@ moved 佔日常 commit 的絕大多數——這是平常一圈幾乎不花 token
    回滾＝revert，歷史可稽核。醫療場景起步用 **PR 模式**（每圈開 PR、人審後 merge 部署）；
    純 moved 的輪次可自動合併，跑順後逐步放寬。
 
-## 多目標與資料存放：工具與資料分離
+## 多目標與資料存放：工具與資料分離（**已實作**，見 DECISIONS D9）
 
-flow-doc 是工具，不綁定單一目標；mPHR_Frontend 只是第一個目標。現在把分析輸出與
-manuals 放在工具 repo 根目錄是單目標時期的便宜行事——多目標會互相覆蓋，而且手冊的
+flow-doc 是工具，不綁定單一目標；`C:\project` 下有二十幾個前端 repo。
+單目標時期把分析輸出與 manuals 放在工具 repo 根目錄，多目標會互相覆蓋，而且手冊的
 版本歷史會跟工具的版本歷史攪在一起。
 
-**每個目標一個「手冊 repo」**，flow-doc 回歸純工具：
+**一個 monorepo 裝所有目標的手冊**（`C:\project\flow-manuals`），flow-doc 回歸純工具：
 
 | 放哪 | 內容 |
 |---|---|
-| flow-doc（工具 repo） | `src/`、`fixtures/`、flow-manual skill、plan／DECISIONS／LOOP，及 LIMITATIONS 的分析器通用部分 |
-| 各目標的手冊 repo | `flow-doc.config.json`、baseline `flow-chains.json`、`packets/`、`manuals/`、site 客製（標題等）、LIMITATIONS 的目標實例（「63 處 SignalR、239 處 watch」這類數字屬於 mPHR，不屬於分析器） |
+| flow-doc（工具 repo） | `src/`、`fixtures/`、`templates/`、flow-manual skill（源）、plan／DECISIONS／LOOP |
+| `flow-manuals/<目標名>/` | `flow-doc.config.json`、baseline `flow-chains.json`、`packets/`、`manuals/`、`LIMITATIONS.md`（目標實例數字屬於該專案，不屬於分析器）、生成的 `site/` |
+| `flow-manuals/.claude/skills/` | flow-manual 的複本，所有目標共用一份 |
 
 手冊 repo 內的版控判準是**再生成本與確定性**：
 
 - `manuals/`（含 overviews）——**必須 commit**。整條管線唯一「貴且不可確定性再生」的產物
   （LLM token＋人審），也是閉環的狀態本體：diff baseline、PR 模式、稽核、revert 全靠它。
-- baseline `flow-chains.json`——commit（metadata 記 analyzer 版本＋目標 commit hash）。
-- `packets/`——建議 commit：14 秒可再生，但 PR 審查時 packet diff 是人讀得懂的變更依據。
-- site 生成頁、trace log——不 commit，純 build artifact。
+- baseline `flow-chains.json`——commit（metadata 待補 analyzer 版本＋目標 commit hash）。
+- `packets/`——commit：14 秒可再生，但 PR 審查時 packet diff 是人讀得懂的變更依據。
+- `site/`、`flow-entries.json`、log——不 commit，純 build artifact。900 頁生成 md
+  進版控會淹沒 PR diff，人審該看的是 manuals 的變更。
 
-機制上幾乎是現成的：config 本來就從**目標 repo 根**找 `flow-doc.config.json`（或 `--config`
-指定），所有輸出路徑相對 CWD——在手冊 repo 目錄下執行 CLI 即完成隔離。缺的只有：
-package.json 補 `bin` 欄位＋`pnpm link` 讓 CLI 可從任意目錄呼叫（一行工程）；
-flow-manual skill 要能被手冊 repo 的 session 找到（複製進其 `.claude/skills/` 或裝
-user-level）；閉環的 baseline／lockfile／排程逐手冊 repo 實例化，一個目標一條 pipeline。
+CLI 已支援：設定檔 `--config` > CWD > 目標 repo 根；目標 repo 命令列 > `FLOW_DOC_TARGET`
+> 設定檔 `target`（相對設定檔目錄解析，手冊 repo 可整個搬家）。日常操作是
+`cd flow-manuals/<目標> && flow-doc trace`，CI 用環境變數覆寫 checkout 路徑。
+
+**不做 pnpm workspace**：`site/` 是 gitignore 的生成目錄，workspace glob 指向生成物很脆弱；
+各 site 獨立 `pnpm install` 即可。
+
+閉環的 baseline／lockfile／排程逐目標實例化，一個目標一條 pipeline。
 
 邊界註記：analyzer 的 entry 偵測與 SFC 處理是 **Vue 3＋TS 專用**。其他 Vue 前端專案
 覆寫 config（follow 白名單、crosscut、aliases）即可上；React 或後端 repo 需要新的
@@ -140,7 +145,8 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 
 ## 待建元件與順序
 
-現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）。缺五件，依序：
+現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
+與設定解析、每個目標自帶設定的手冊 repo（D9）。缺五件，依序：
 
 1. **語意 ID**（`detect.ts` 的 id 去行號）——地基，不先做後面全白搭
 2. `flow-doc diff`——五分類＋熔斷判定＋analyzer 版本比對

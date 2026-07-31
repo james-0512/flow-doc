@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { defaultVueConfig } from '../config.js'
+import { loadConfig } from '../config.js'
 import { loadWorkspace, scanEntries } from '../workspace.js'
 import type { ChainNode, FlowChain, TraceResult } from '../types.js'
 import { traceEntries } from './trace.js'
@@ -10,7 +10,7 @@ const FIXTURE = fileURLToPath(new URL('../../fixtures/mini-vue', import.meta.url
 let trace: TraceResult
 
 beforeAll(async () => {
-  const ws = await loadWorkspace(defaultVueConfig(FIXTURE))
+  const ws = await loadWorkspace(loadConfig(FIXTURE))
   trace = traceEntries(ws, scanEntries(ws))
 }, 60_000)
 

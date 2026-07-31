@@ -1,0 +1,33 @@
+{
+  "_說明": "複製到 <手冊 repo>/<目標名>/flow-doc.config.json 後改。陣列是整段取代不是合併，寫了就要列完整。底線開頭的鍵會被忽略，可留作註解。",
+
+  "target": "../../你的目標repo名",
+
+  "_follow": "會被展開追蹤的業務層目錄。預設已含 views/components/layouts/stores/composables/api/router，只有目錄慣例不同才需要覆寫。",
+
+  "_opaque": "記錄「有用到」但不展開內部的目錄：共用 UI 元件、工具函式。手冊不需要描述 formatDate 怎麼實作。",
+  "opaque": ["src/components/Utils/", "src/utils/functions/"],
+
+  "_stop": "完全略過、連記錄都不留。generated code 一定要放這裡——大檔會讓 DFS 爆掉（mPHR 的 swaggerApi.ts 有 9.5 萬行且在 src/ 內，只擋 node_modules 是不夠的）。",
+  "stop": ["src/plugins/generated/", "src/types/", "src/assets/"],
+
+  "_followOverrides": "逐檔從 opaque/stop 撈回來展開。判準是「會不會改變流程走向」——權限判斷會，日期格式化不會。",
+  "followOverrides": [],
+
+  "_aliases": "取自目標專案 tsconfig 的 paths，前綴替換。",
+  "aliases": { "@/": "src/" },
+
+  "_crosscut": "橫切邏輯入口：每條流程都會經過、但不該在每條裡重複展開的東西（路由守衛、axios 攔截器）。unwrapReturn 用於 createXxxGuard(deps) 回傳閉包的形狀。",
+  "crosscut": [
+    {
+      "file": "src/router/guards",
+      "symbolPattern": "^create[A-Za-z]+Guard$",
+      "unwrapReturn": true,
+      "label": "路由守衛"
+    },
+    { "file": "src/utils/service/api.service.ts", "label": "API 請求／回應攔截器" }
+  ],
+
+  "_exclude": "掃描時排除的 glob。各專案的報告產出目錄不同，記得補。",
+  "exclude": ["**/node_modules/**", "**/dist/**", "**/*.spec.ts", "**/*.test.ts", "**/*.d.ts"]
+}

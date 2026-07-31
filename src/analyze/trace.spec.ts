@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { defaultVueConfig } from '../config.js'
+import { loadConfig } from '../config.js'
 import { loadWorkspace, scanEntries } from '../workspace.js'
 import type { ChainNode, EntryScanResult, FlowChain, TraceResult } from '../types.js'
 import { traceEntries } from './trace.js'
@@ -15,7 +15,7 @@ let scan: EntryScanResult
 let trace: TraceResult
 
 beforeAll(async () => {
-  const ws = await loadWorkspace(defaultVueConfig(FIXTURE))
+  const ws = await loadWorkspace(loadConfig(FIXTURE))
   scan = scanEntries(ws)
   trace = traceEntries(ws, scan)
 }, 60_000)

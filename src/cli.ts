@@ -2,7 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { Command } from 'commander'
-import { loadConfig } from './config.js'
+import { resolveConfig, type ResolvedConfig } from './config.js'
 import { loadWorkspace, scanEntries } from './workspace.js'
 import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
 import { defaultPackOptions, findPeers, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
@@ -109,25 +109,39 @@ function parseCovers(markdown: string): string[] {
   return [...block[1]!.matchAll(/^\s*-\s*(.+?)\s*$/gm)].map(m => m[1]!)
 }
 
+/**
+ * 解析設定與目標 repo；失敗時印出可行動的訊息並設 exit code，回傳 null。
+ *
+ * 每次都回報「分析誰、設定從哪來」——手冊與工具分家後，同一台機器上可能有
+ * 多個目標，靜默地分析錯 repo 是最貴的失敗。
+ */
+function resolveTarget(repoArg: string | undefined, configPath?: string): ResolvedConfig | null {
+  try {
+    const resolved = resolveConfig({ repoArg, configPath })
+    const from = resolved.configFile ?? '內建預設值'
+    console.log(`目標 ${resolved.config.repoRoot}（來源：${resolved.targetSource}）\n設定 ${from}`)
+    return resolved
+  } catch (err) {
+    console.error((err as Error).message)
+    process.exitCode = 1
+    return null
+  }
+}
+
 const program = new Command()
 program.name('flow-doc').description('從 TS/Vue 程式碼庫追蹤業務流程，產出流程手冊').version('0.1.0')
 
 program
   .command('entries')
   .description('階段一：掃描業務流程的 entry point 候選')
-  .argument('<repo>', '目標 repo 路徑')
+  .argument('[repo]', '目標 repo 路徑（省略時取設定檔 target 或 FLOW_DOC_TARGET）')
   .option('-o, --out <file>', '輸出 JSON 檔', 'flow-entries.json')
   .option('-c, --config <file>', 'flow-doc.config.json 路徑')
   .option('--top <n>', '摘要列出的業務域數量', '15')
-  .action(async (repo: string, opts: { out: string; config?: string; top: string }) => {
-    const repoRoot = path.resolve(repo)
-    if (!fs.existsSync(repoRoot)) {
-      console.error(`找不到目標 repo：${repoRoot}`)
-      process.exitCode = 1
-      return
-    }
-    const config = loadConfig(repoRoot, opts.config)
-    console.log(`載入 ${repoRoot} …`)
+  .action(async (repo: string | undefined, opts: { out: string; config?: string; top: string }) => {
+    const resolved = resolveTarget(repo, opts.config)
+    if (!resolved) return
+    const config = resolved.config
     const ws = await loadWorkspace(config)
     const result = scanEntries(ws)
     fs.writeFileSync(opts.out, JSON.stringify(result, null, 2), 'utf8')
@@ -138,21 +152,19 @@ program
 program
   .command('trace')
   .description('階段二：從 entry 出發追同步 call chain')
-  .argument('<repo>', '目標 repo 路徑')
+  .argument('[repo]', '目標 repo 路徑（省略時取設定檔 target 或 FLOW_DOC_TARGET）')
   .option('-o, --out <file>', '輸出 JSON 檔', 'flow-chains.json')
   .option('-c, --config <file>', 'flow-doc.config.json 路徑')
   .option('--domain <name>', '只追單一業務域，用於逐條檢查')
   .option('--max-depth <n>', 'DFS 深度上限', String(defaultTraceOptions.maxDepth))
   .action(
-    async (repo: string, opts: { out: string; config?: string; domain?: string; maxDepth: string }) => {
-      const repoRoot = path.resolve(repo)
-      if (!fs.existsSync(repoRoot)) {
-        console.error(`找不到目標 repo：${repoRoot}`)
-        process.exitCode = 1
-        return
-      }
-      const config = loadConfig(repoRoot, opts.config)
-      console.log(`載入 ${repoRoot} …`)
+    async (
+      repo: string | undefined,
+      opts: { out: string; config?: string; domain?: string; maxDepth: string }
+    ) => {
+      const resolved = resolveTarget(repo, opts.config)
+      if (!resolved) return
+      const config = resolved.config
       const ws = await loadWorkspace(config)
       const scan = scanEntries(ws)
       if (opts.domain) {
@@ -342,12 +354,15 @@ program
   .command('verify')
   .description('階段四後置：檢查生成的手冊沒有幻覺（引用的 file:line 必須真實且在封包範圍內）')
   .argument('<manual>', '生成的手冊 Markdown')
-  .requiredOption('-r, --repo <path>', '目標 repo 路徑')
+  .option('-r, --repo <path>', '目標 repo 路徑（省略時取設定檔 target 或 FLOW_DOC_TARGET）')
+  .option('-c, --config <file>', 'flow-doc.config.json 路徑')
   .option('-p, --packet <file>', '對應的流程封包，用來檢查引用是否超出提供範圍')
-  .action((manual: string, opts: { repo: string; packet?: string }) => {
+  .action((manual: string, opts: { repo?: string; config?: string; packet?: string }) => {
+    const resolved = resolveTarget(opts.repo, opts.config)
+    if (!resolved) return
     const markdown = fs.readFileSync(manual, 'utf8')
     const packet = opts.packet ? fs.readFileSync(opts.packet, 'utf8') : undefined
-    const result = verifyManual(markdown, path.resolve(opts.repo), packet)
+    const result = verifyManual(markdown, resolved.config.repoRoot, packet)
 
     console.log(`\n檢查 ${manual}`)
     console.log(`  位置引用 ${result.references} 處 · 問題 ${result.violations.length} 處`)

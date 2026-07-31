@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "從 TS/Vue 程式碼庫追蹤業務流程執行路徑，產出流程手冊",
+  "bin": {
+    "flow-doc": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",

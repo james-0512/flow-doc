@@ -30,7 +30,9 @@ describe('domainOf', () => {
 })
 
 function scan(rel: string, source: string, ctx?: Partial<DetectContext>) {
-  const config = defaultVueConfig('/repo')
+  // opaque 由各專案的設定檔宣告，不在通用預設值裡——這裡測的是「不可分析元件
+  // 回退成 entry」的行為，所以要自己把 Utils 標成 opaque
+  const config = { ...defaultVueConfig('/repo'), opaque: ['src/components/Utils/'] }
   const sfc = parseSfc(rel, source)
   const facts = sfc.virtualTs
     ? extractScriptFacts(`${rel}.ts`, sfc.virtualTs)

@@ -1,0 +1,14 @@
+{
+  "opaque": ["src/components/Utils/", "src/utils/functions/"],
+  "follow": [
+    "src/views/",
+    "src/components/",
+    "src/layouts/",
+    "src/stores/",
+    "src/utils/composables/",
+    "src/utils/service/",
+    "src/api/",
+    "src/router/"
+  ],
+  "crosscut": [{ "file": "src/utils/service/api.service.ts", "label": "API 請求／回應攔截器" }]
+}
