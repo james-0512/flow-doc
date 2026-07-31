@@ -1,6 +1,9 @@
 # 閉環設計
 
-> 狀態：**設計定形、尚未實作**（2026-07-31 討論定案）。
+> 狀態：**全部實作完成**（2026-07-31；決策紀錄見 DECISIONS D9–D14）。
+> 指令：`flow-doc loop`（一圈的狀態機）；容器：`Dockerfile`＋`docker-compose.yml`
+> （loop／publish／web）；CI：flow-manuals repo 的 `.github/workflows/flow-doc-{loop,publish}.yml`。
+> 尚未線上實測的只剩 narrate 的真實 API 呼叫與 GitHub 端的 PR 流（需要憑證與 runner）。
 > 對 [plan.md](plan.md) M5 的修正：不做「檔案 hash 快取、增量重分析」——全量分析只要 14 秒，
 > 快取解錯了問題。貴的是 LLM token，**增量該放在敘述層**：全量分析、增量生成。
 
@@ -178,13 +181,22 @@ build 到暫存目錄再原子換版，否則使用者會讀到半套站。
 **generated 檔必須存在——這條會讓第一輪滿江紅。** `src/components.d.ts`
 由 unplugin-vue-components 產生且不進版控，乾淨 checkout（CI／容器／`git worktree`）
 不會有它。少了它，全域註冊元件的標籤全部解析不到檔案——實測同一個 commit 的流程數
-從 901 變成 940。分析器現在會警告，但容器仍必須**先跑目標的 codegen**，
-或確保 checkout 含 generated 檔。
+從 901 變成 940。`loop` 對此直接拒跑（exit 3）而不是只警告。實際的 codegen 指令是
+`pnpm generate:components-dts`（用 middleware mode 起 vite 再關掉，借 unplugin 的掃描產檔），
+**需要目標完整的 node_modules**——CI workflow 已內建 `pnpm install ＋ codegen` 前置步。
 
 **node_modules 要一致。** 分析器不需要目標的依賴（`createAnalysisProgram` 刻意不用目標
 tsconfig，模組解析靠 `baseUrl`＋alias；`fixtures/mini-vue` 完全沒有 node_modules 也能追完整條鏈）。
 有裝與沒裝會讓「解析不到定義」的計數不同，那個數字寫在封包標頭裡——結構簽章刻意
 不收它，所以不會誤判成 changed，但封包內容仍會有差異。容器直接掛整個目標 repo 最省事。
+
+**⚠ 但「掛整個 repo」在 Windows host 上不成立（實測，見 D14）。** pnpm 的 node_modules
+是 junction 結構，junction 的絕對路徑目標在 Linux 容器裡是斷鏈——pinia 這類「靠
+node_modules 型別」的解析全部失效，941/1894 條鏈樹形改變，diff 滿江紅、熔斷器擋下
+（防呆二的第一次真實出動，一個檔案都沒寫）。所以 **baseline 必須與分析環境同源**：
+生產的 loop 容器跑在 Linux runner（目標 checkout 與 pnpm install 原生完成、baseline 由
+容器產生）；Windows 開發機用原生 node 跑 `flow-doc loop`，容器只拿來跑 publish／web。
+`flow-chains.json` 的 metadata 記 `platform`，跨平台 diff 前 loop 會明白警告。
 
 ### 一圈的實際順序
 
@@ -223,22 +235,24 @@ PR 描述直接用「本次變更頁」的內容（見下節），審查者一�
 diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務流程、哪幾章待補。
 等於**從程式碼自動生成的業務層 release notes**，QA 拿這頁對版本驗收。
 
-## 待建元件與順序
+## 元件地圖（全部完成，D14）
 
-現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
-與設定解析、每個目標自帶設定的手冊 repo（D9）、語意 ID 與 baseline metadata（D10）、
-`flow-doc diff` 五分類＋熔斷＋版本比對（D11）、`flow-doc reanchor` 與 git rename
-偵測（D12）、**`flow-doc narrate`（D13）**。缺一件：
+| 元件 | 位置 |
+|---|---|
+| 一圈的狀態機（鎖、早退、verdict 調度、待補佇列、auto-merge 判定） | `src/loop.ts`＋`loop.spec.ts`（32 測試） |
+| `flow-doc loop` 指令（真實步驟組裝：trace／diff／pack／歸檔／reanchor／narrate／verify／commit／PR） | `src/cli.ts` |
+| 共用編排（CLI 單步指令與 loop 用同一份） | `writePackets`／`reanchorAll`／`narrateTargets` |
+| runner 映像（工具烤進映像；loop 與 publish 兩種模式） | `Dockerfile`＋`scripts/container-entrypoint.sh` |
+| 兩個服務與共用 volume | `docker-compose.yml`＋`scripts/nginx.conf` |
+| nightly 排程＋手動觸發（PR 模式）、merge 後部署 | flow-manuals 的 `.github/workflows/flow-doc-{loop,publish}.yml` |
 
-1. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
-   （每個目標一條 pipeline 實例）
-
-**分析與生成的指令都齊了**：`trace → diff →`（`reanchor` 或 `narrate`）`→ verify → site`。
-0-token 的那條路徑（純 moved）完全確定性；需要 LLM 的那條由 verify 把關，
-不過就降級待人工，絕不寫入。
+閉環的狀態全在手冊 repo：baseline `flow-chains.json`、`manuals/`（歸檔進 `manuals/archive/`）、
+`packets/`、**`pending.json`（待人工佇列——baseline 前進後唯一記得欠帳的地方，見 D14）**、
+`CHANGES.md`（本次變更頁，兼 PR 描述）。`loop-result.json` 與 lockfile 是工作檔，不進版控。
 
 narrate 需要 API 憑證（`ANTHROPIC_API_KEY` 或 `ant auth login` 的 profile）——
-容器化那節列的「兩組憑證」其中一組就是它。
+容器化那節列的「兩組憑證」其中一組就是它。**缺憑證整圈照樣收尾**：
+該寫的章節進佇列，補上憑證後的下一輪自動補寫。
 
 ## 成本輪廓與殘餘風險
 

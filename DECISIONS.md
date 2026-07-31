@@ -320,6 +320,69 @@ API 側的選擇：`claude-opus-5`（這是管線裡唯一需要判斷力的一�
 `:行號:` 格式——D10 之後 `covers:` 不含行號，這段**永遠不會命中**。實際需求已由
 D12 的「封包明列 peer 位置」滿足，移除後 125/134 通過數一條未變，確認是死碼。
 
+## D14 — loop：一圈的狀態機與 CI／容器 wiring
+
+`flow-doc loop` 把整圈串起來：鎖 → 早退比對 → trace → diff 分流 →（歸檔／reanchor／narrate）
+→ verify → commit（可選 PR）。狀態機（`src/loop.ts`）只做決策，所有碰檔案系統、git、API 的
+動作經由 `LoopSteps` 注入——早退、熔斷、降級、佇列收斂全部可用假步驟測（32 個測試）。
+`pack`／`reanchor`／`narrate` 的編排邏輯從 CLI action 抽成可重用函式，兩邊共用同一份
+（pack 抽出後與既有 677 份封包逐位元相同）。
+
+### 待人工佇列必須進版控（pending.json）
+
+baseline 前進之後，下一輪 diff 把上輪的 changed 看成 unchanged——「這章還沒寫完」這個事實
+**只剩佇列記得**。不落地的話，降級的章節會永遠停在舊敘述，而且沒有任何地方看得出來。
+所以佇列是 commit 進手冊 repo 的檔案，narrate 每輪的目標＝本輪 `work.rewrite` ∪ 佇列裡欠的；
+寫成即清出、流程消失即清出、重複略過不重設 since（「掛多久」是人排優先序的依據）。
+配套規則：**commit 沒前進的輪次不重寫 baseline 與封包**（純補佇列，避免雜訊 diff）；
+早退條件多一條「佇列沒有可重試的欠帳」。
+
+### verify 在機械路徑是佇列、不是 gate
+
+narrate 自帶驗收（不過就不寫入），但 reanchor 對「對照不到」的引用刻意原樣保留——
+那些紅燈屬於待人工，不該擋整輪（防呆一）。loop 的 verify 範圍是「本輪動過的檔案 ∪
+佇列中先前驗證不過的檔案」：後者讓人修好的章節自動清出佇列，也讓 Form 域那 9 份
+既有問題只在被動到時進佇列，不會每晚擋路。
+
+### 自動合併從嚴
+
+`autoMergeEligible` ＝ 無 LLM 產出 且 無歸檔 且 verify 全綠 且 沒有新欠帳。
+歸檔雖然 0 token，但「流程消失」是業務語意上值得人看一眼的事。放行錯一次，
+人就不會再信任這條管線——從嚴的成本只是多審幾個本來就該看的 PR。
+
+### exit code 是 CI 的 gate
+
+0 完成或早退 · 1 執行錯誤 · 2 需人工（升版圈、熔斷、無 baseline）· 3 這輪沒跑
+（鎖被占、dirty、缺 generated 檔）。PR 模式在 gh 失敗時的語意：分支已推、工作不丟、
+main 乾淨、重跑冪等——回到原分支收尾放在 finally。
+
+### codegen 的答案（HANDOFF 的前置問題）
+
+`pnpm generate:components-dts` ＝ 用 middleware mode 起一個 vite dev server 再關掉，
+借 unplugin-vue-components 的掃描產出 `src/components.d.ts`——**需要目標完整的 node_modules**。
+容器掛 host 的 repo（已有 dts）就免跑；CI 乾淨 checkout 必須先 `pnpm install` 再 codegen，
+workflow 已內建這步。
+
+### 跨環境的模組解析差異——熔斷器的第一次真實出動
+
+把 Windows host 的目標 repo 掛進 Linux 容器跑一圈：diff 報 **949 條 changed**，熔斷器擋下、
+一個檔案都沒寫。根因不是程式變更：mPHR 的 node_modules 是 pnpm junction 結構，junction 的
+絕對路徑目標（`C:\…`）在 Linux 容器裡是斷鏈，pinia 這類「靠 node_modules 型別」的解析全部
+失效——941/1894 條鏈的樹形改變（實測 `loadingStore.addLoadingKey` 這類 store 方法全部
+解析不到）。結論寫進設計：
+
+- **baseline 必須與分析環境同源**。生產的 loop 容器要跑在 Linux runner，目標 checkout 與
+  `pnpm install` 原生完成，baseline 也由容器產生；Windows 開發機直接跑原生 node。
+- `flow-chains.json` 的 analyzer metadata 加記 `platform`（選填、不 bump 表示法），
+  loop 在跨平台 diff 前明白警告「先懷疑環境而不是程式」。
+
+### 端到端驗證（scratch clone，未動真實 manuals）
+
+早退 0.93 秒（連 trace 都不跑）；合成 baseline 一圈 18 秒——diff 在 1910 條鏈中精準抓出
+1 moved＋1 changed（零噪音）、reanchor 改寫 7 處引用（+3 位移全對）、無憑證時 narrate
+降級進佇列且輪次照樣收尾；佇列重試輪不動 baseline 只補欠帳；PR 模式分支推送與現場還原
+驗證通過；publish 容器 build 950 頁站台原子換版，nginx 服務中文路徑全綠。
+
 ---
 
 ## 尚未定案

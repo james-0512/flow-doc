@@ -11,7 +11,7 @@
 第一個目標是 mPHR_Frontend，資料在 `C:\project\flow-manuals\mPHR_Frontend`。
 
 設計決策與其理由記在 [DECISIONS.md](DECISIONS.md)，閉環（手冊自動跟著 main 更新）的
-設計記在 [LOOP.md](LOOP.md)（尚未實作）。新目標從 [templates/](templates/) 起步。
+閉環設計與現況記在 [LOOP.md](LOOP.md)（已實作）。新目標從 [templates/](templates/) 起步。
 
 ## 管線
 
@@ -38,9 +38,12 @@ cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 | `narrate` | 用 API 產出結構或主體變了的章節，verify 當驗收關 |
 | `site` | 產生 VitePress 站台 |
 | `verify` | 檢查生成的敘述沒有幻覺 |
+| `loop` | 閉環一圈：早退比對 → trace → diff 分流 → 改寫 → verify → commit／PR |
 
 `diff` 與 `reanchor` 是閉環的骨架（見 [LOOP.md](LOOP.md)）：多數 commit 只讓行號漂移，
-那些章節不需要 LLM 重寫，機械改寫即可。
+那些章節不需要 LLM 重寫，機械改寫即可。`loop` 把整圈串起來——沒憑證也能跑
+（該寫的章節進 `pending.json` 待補佇列），排程與容器見 LOOP.md〈容器化〉與
+`docker-compose.yml`。
 
 撰寫敘述用 `.claude/skills/flow-manual`：讀 `packets/*.md`，寫進 `manuals/<entryId slug>.md`。
 這份 skill 是「源」，各手冊 repo 的 `.claude/skills/` 有一份複本；改規則只改這裡，
