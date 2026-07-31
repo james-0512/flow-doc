@@ -147,6 +147,44 @@ flow-doc 是工具，不綁定單一目標；`C:\project` 下有二十幾個前�
 順帶發現：README 與 LIMITATIONS 的數字（902 流程／339 寫入／5 條全域前置）**早已過時**，
 舊程式碼跑出來就是 901／305／16。實例數字放在工具 repo 裡沒人會去對，這正是分家的另一個理由。
 
+## D10 — 語意錨點 ID 取代 file:line 身份（閉環地基）
+
+手冊檔名就是 entry ID 的 slug，而舊 ID 是 `檔案:行號:標籤:事件`——上游隨便一個 commit
+讓行號漂移，同一顆按鈕就變成「新流程」：舊敘述成孤兒、閉環每晚重寫整本手冊。
+新 ID 是 `檔案#標籤.事件@handler`，行號降級為 payload。
+
+- **handler 名要進 ID**：同標籤同事件在同檔出現多次時，綁不同 handler 就是不同的
+  業務動作（一顆存檔一顆刪除）。少了它只能靠序數，而序數會隨程式碼調整位移。
+- **完全撞名者以文件順序加 `~2`**：實測 mPHR 9.1%（174/1910）需要，其餘 90.9% 是
+  純語意錨定。這是唯一可用的 tiebreaker，代價是中間插入會讓後面位移。
+- **crosscut 用 label 不用 index**：`crosscut:檔案#路由守衛 — AuthGate`，
+  index 會隨檔案內宣告順序漂移。
+- **ROUTE 用 path**：路由的語意身份就是它的 path。
+- **表示法版本**：`REPRESENTATION_VERSION` 常數（非 package 版本、非 git hash）——
+  前者會忘記 bump，後者每個 commit 都變、改錯字也觸發全量重生。它是刻意的人為宣告：
+  **它變了就代表舊 baseline 不能拿來 diff**。連同目標 repo 的 commit hash 與 dirty
+  旗標一起寫進 `flow-chains.json`，供閉環早退比對與升版圈判斷。
+
+### 順帶修掉一個會靜默出錯的既存 bug
+
+`slugify` 截斷在 100 字元，長 ID 會共用同一個檔名。**舊規則下 mPHR 有 15 組碰撞**，
+其中一組實際發生了：`PsychiatricEmergencyResponseSystem/.../Response/IndexView.vue`
+的 5 條流程共用同一個截斷檔名，站台把同一份手冊顯示給 5 條流程——
+其中 3 條（`showAddFormModal`、`closeFormHandler`、`visitationProgressCompletedHandler`）
+是完全不同的動作。語意 ID 更長，碰撞會惡化到 114 組。
+
+改成「超長時補完整 ID 的短雜湊」而非純截斷，碰撞歸零（1910/1910 唯一）。
+所以「已撰寫敘述」從 229 降為 226——**226 才是對的，229 是碰撞灌水的**。
+
+同批修掉 `pack` 不清輸出目錄的問題：流程消失或改名會留下孤兒封包，
+永遠不再更新卻仍被 diff 與 PR 審查看到。
+
+### 遷移
+
+新舊 ID 由同一次 trace 同時吐出（`legacyEntryId`），對照精確一對一，不靠重建猜測。
+135 份手冊全部改名、23 份的 67 個 `covers:` 條目全部改寫，零孤兒、零失效引用。
+`legacyEntryId` 是過渡欄位，遷移提交後即移除。
+
 ---
 
 ## 尚未定案

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { glob } from 'tinyglobby'
 import type { AnalyzerConfig } from './config.js'
-import { domainOf, scanSfc, type DetectContext } from './entry/detect.js'
+import { disambiguate, domainOf, scanSfc, type DetectContext } from './entry/detect.js'
 import { extractRoutes } from './entry/routes.js'
 import { parseGlobalComponents } from './load/registry.js'
 import { resolveSpecifier, resolveToFile } from './load/resolve.js'
@@ -92,11 +92,14 @@ export function scanEntries(ws: Workspace): EntryScanResult {
   const routeFiles = ws.tsFiles.filter(f => f.startsWith(`${ws.config.routerDir}/`))
   for (const rel of routeFiles) {
     const source = fs.readFileSync(path.join(ws.config.repoRoot, rel), 'utf8')
+    const routeEntries: EntryCandidate[] = []
     for (const route of extractRoutes(rel, source)) {
       const target = route.componentSpec ? resolveSpecifier(ws.config.aliases, rel, route.componentSpec) : null
       const component = target ? (resolveToFile(ws.files, target) ?? undefined) : undefined
-      entries.push({
-        id: `${rel}:${route.line}:${route.path}`,
+      routeEntries.push({
+        // 路由的語意身份就是它的 path，行號無關
+        id: `${rel}#route:${route.path}`,
+        legacyId: `${rel}:${route.line}:${route.path}`,
         kind: 'ROUTE',
         domain: component ? domainOf(component) : 'router',
         label: `route ${route.path}${route.name ? ` (${route.name})` : ''}`,
@@ -107,6 +110,9 @@ export function scanEntries(ws: Workspace): EntryScanResult {
         routeName: route.name
       })
     }
+    // 同檔內重複的 route path（巢狀重定義）以序數區分
+    disambiguate(routeEntries)
+    entries.push(...routeEntries)
   }
 
   return {

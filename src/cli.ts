@@ -215,6 +215,14 @@ program
       if (opts.flow) chains = chains.filter(c => c.entryId.includes(opts.flow!))
 
       fs.mkdirSync(opts.outDir, { recursive: true })
+      // 先清掉舊封包。不清的話流程消失或改名後會留下孤兒檔案，
+      // 閉環的 diff 與 PR 審查都會被這些永遠不再更新的殘骸混淆
+      let removed = 0
+      for (const f of fs.readdirSync(opts.outDir)) {
+        if (!f.endsWith('.md')) continue
+        fs.rmSync(path.join(opts.outDir, f))
+        removed++
+      }
       const packOpts = { maxSourceChars: Number(opts.maxChars) }
       let total = 0
       let merged = 0
@@ -246,7 +254,7 @@ program
       for (const [name, md] of overviews) fs.writeFileSync(path.join(opts.outDir, name), md, 'utf8')
 
       const packets = groups.size + result.crosscut.length
-      console.log(`\n已打包 ${packets} 份封包到 ${path.resolve(opts.outDir)}`)
+      console.log(`\n已打包 ${packets} 份封包到 ${path.resolve(opts.outDir)}（先清掉舊的 ${removed} 份）`)
       console.log(`  涵蓋 ${chains.length} 條流程 + ${result.crosscut.length} 條全域前置`)
       if (merged > 0) console.log(`  ${merged} 個觸發點與其他流程共用 handler，已合併（省下 ${merged} 份敘述）`)
       console.log(`  總字元 ${total.toLocaleString()} · 平均 ${packets ? Math.round(total / packets).toLocaleString() : 0} 字元/封包`)

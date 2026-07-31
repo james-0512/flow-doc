@@ -5,6 +5,7 @@
  * analyzer 只吐這些結構，generator 只讀這些結構。任何 LLM 生成的內容都必須
  * 能對回這裡的 SourceLoc，否則視為幻覺。
  */
+import type { TargetRevision } from './version.js'
 
 /** 原始碼位置。永遠指回使用者看得到的檔案（`.vue` 而非 virtual `.vue.ts`）。 */
 export interface SourceLoc {
@@ -37,7 +38,24 @@ export type EntryKind =
  * 穿越邊界的 SINK。真正的手冊目錄要等階段二收斂後才定案。
  */
 export interface EntryCandidate {
+  /**
+   * 語意錨點識別碼，**不含行號**：`檔案#標籤.事件@handler`。
+   *
+   * 手冊檔名就是這個 ID 的 slug，所以它一變，敘述就對不回流程。用行號當身份的話，
+   * 上游隨便一個 commit 讓行號漂移，同一顆按鈕就會變成「新流程」——舊敘述成孤兒、
+   * 閉環每晚重寫整本手冊。行號改放 `loc`，那是 payload 不是身份。
+   *
+   * 同檔內完全同名的觸發點（同標籤同事件同 handler）以文件順序加 `~2`、`~3` 區分；
+   * 那是唯一可用的 tiebreaker，代價是中間插入一個會讓後面的序數位移。
+   */
   id: string
+  /**
+   * 舊版 `檔案:行號:標籤:事件` 識別碼，**僅供一次性遷移**。
+   *
+   * 遷移腳本用它把既有手冊檔名與 `covers:` 條目換成新 ID。遷移完成並提交後，
+   * 這個欄位連同產生它的程式碼一起移除。
+   */
+  legacyId?: string
   kind: EntryKind
   /** 業務域。取自 src/{views,components,layouts}/<Domain>/，無法歸類則 'shared' */
   domain: string
@@ -182,7 +200,10 @@ export interface ChainNode {
 }
 
 export interface FlowChain {
+  /** 語意錨點識別碼，不含行號。見 EntryCandidate.id */
   entryId: string
+  /** 舊版含行號的識別碼，僅供一次性遷移。見 EntryCandidate.legacyId */
+  legacyEntryId?: string
   domain: string
   label: string
   /** 觸發方式：事件名、生命週期鉤子名，或橫切邏輯的階段 */
@@ -251,6 +272,20 @@ export interface TraceStats {
 export interface TraceResult {
   repoRoot: string
   generatedAt: string
+  /**
+   * 產生這份分析的分析器身分。閉環 diff 起手先比 `representation`：
+   * 相同走日常圈，不同走升版圈（表示法變了，舊 baseline 不能拿來 diff）。
+   */
+  analyzer: {
+    representation: number
+    /** package.json 的版本，資訊用；判斷依據是 representation */
+    version: string
+  }
+  /**
+   * 目標 repo 的 commit 與髒污狀態。閉環醒來後先比 commit，沒動就直接退出——
+   * 連 trace 都不必跑。
+   */
+  target: TargetRevision
   chains: FlowChain[]
   /**
    * 橫切邏輯的鏈：axios 攔截器與路由守衛。

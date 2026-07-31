@@ -46,20 +46,17 @@ moved 佔日常 commit 的絕大多數——這是平常一圈幾乎不花 token
 **總覽的二層連動**：域內任何 changed / added / removed → 該域篇章總覽重寫；
 任一域總覽變了 → 全站總覽重寫。token 成本止於此。
 
-## 語意 ID——整個閉環的地基，最先做
+## 語意 ID——整個閉環的地基（**已實作**，見 DECISIONS D10）
 
-現況：entry id = `檔案:行號:標籤:事件`（`src/entry/detect.ts`），手冊檔名是它的 slug。
-行號一漂，同一顆按鈕就變成「新流程」：舊敘述變孤兒、`covers:` 失效、site 對不回去。
+entry id 為 `檔案#標籤.事件@handler`，不含行號；行號降級為 payload。
+crosscut 用 label（守衛名／攔截器階段）、ROUTE 用 path。完全撞名者以文件順序加 `~2`
+（實測 mPHR 9.1% 需要）。`flow-chains.json` 另記 `analyzer.representation`
+與目標 repo 的 commit／dirty，供早退比對與升版圈判斷。
 
-改法：
+135 份手冊已遷移完畢（含 67 個 `covers:` 條目），零孤兒。
 
-- id 改為 **`檔案＋標籤＋事件＋handler 名`**，行號降級為 payload（封包與敘述照常引用行號，
-  但身份不再含行號）。
-- 消歧：同檔同標籤同事件綁**不同** handler 本來就靠 handler 名區分；綁**同一個** handler 的
-  多個觸發點，pack 已用 `groupByHandler` 合併成一份封包，語意 ID 與這個合併方向一致。
-  極端情況（同 handler 不同 inline 參數）以文件順序序數當 tiebreaker。
-- crosscut 的 `crosscut:檔案#index` 也一併換成名稱型（守衛名／攔截器回呼名），index 同樣不穩定。
-- 檔案搬移：diff 前先跑 git rename 偵測重映射路徑，避免單純搬檔被誤判成大量 removed＋added。
+仍待處理：**檔案搬移**——diff 前先跑 git rename 偵測重映射路徑，
+避免單純搬檔被誤判成大量 removed＋added。
 
 ## 防呆三件
 
@@ -220,13 +217,17 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 ## 待建元件與順序
 
 現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
-與設定解析、每個目標自帶設定的手冊 repo（D9）。缺五件，依序：
+與設定解析、每個目標自帶設定的手冊 repo（D9）、**語意 ID 與 baseline metadata（D10）**。
+缺四件，依序：
 
-1. **語意 ID**（`detect.ts` 的 id 去行號）——地基，不先做後面全白搭
-2. `flow-doc diff`——五分類＋熔斷判定＋analyzer 版本比對
-3. `flow-doc reanchor`——moved 章節的行號機械改寫
-4. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
-5. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
+1. `flow-doc diff`——五分類＋熔斷判定＋analyzer 版本比對＋git rename 偵測。
+   **必須比「新 chains vs 舊 baseline chains」，不可比「chains vs manuals」**：
+   901 條流程只有 226 條寫了敘述，拿 manuals 當基準會把 675 條沒寫過的判成 added，
+   第一輪就想寫 675 章、直接撞熔斷。閉環的職責是**維護已寫的敘述，不主動補寫沒寫的**——
+   補寫是獨立的人為工作。
+2. `flow-doc reanchor`——moved 章節的行號機械改寫
+3. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
+4. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
    （每個目標一條 pipeline 實例）
 
 ## 成本輪廓與殘餘風險

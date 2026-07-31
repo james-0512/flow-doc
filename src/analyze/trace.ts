@@ -3,6 +3,7 @@ import { Node, SyntaxKind } from 'ts-morph'
 import type { CallExpression, SourceFile } from 'ts-morph'
 import { classifyPath } from '../config.js'
 import type { AnalyzerConfig } from '../config.js'
+import { packageVersion, readTargetRevision, REPRESENTATION_VERSION } from '../version.js'
 import type { Workspace } from '../workspace.js'
 import type {
   AsyncLink,
@@ -570,7 +571,10 @@ function buildCrosscutChain(
   flatten(root, agg, true)
   const effects = dedupeEffects(agg.effects)
   return {
-    entryId: `crosscut:${file}#${index}`,
+    // label 是守衛名／攔截器階段（例如「路由守衛 — AuthGate」），
+    // 那才是它的語意身份；index 會隨檔案內的宣告順序漂移
+    entryId: `crosscut:${file}#${label}`,
+    legacyEntryId: `crosscut:${file}#${index}`,
     domain: '全域前置',
     label,
     trigger: label,
@@ -664,6 +668,7 @@ export function traceEntries(
 
     chains.push({
       entryId: entry.id,
+      legacyEntryId: entry.legacyId,
       domain: entry.domain,
       label: entry.label,
       trigger: entry.trigger,
@@ -685,6 +690,8 @@ export function traceEntries(
   return {
     repoRoot: ws.config.repoRoot,
     generatedAt: new Date().toISOString(),
+    analyzer: { representation: REPRESENTATION_VERSION, version: packageVersion() },
+    target: readTargetRevision(ws.config.repoRoot),
     chains,
     crosscut,
     stats: {

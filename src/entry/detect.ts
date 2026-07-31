@@ -85,13 +85,43 @@ function resolveTag(ctx: DetectContext, sfcRel: string, facts: ScriptFacts, tag:
  * - **但**若子元件不可分析（第三方、或落在 opaque 白名單外如 components/Utils/），
  *   我們永遠掃不到它內部的觸發點，此時這個 listener 就是最上游 → 算 entry
  */
+/**
+ * 語意錨點：檔案 + 標籤 + 事件 + handler 名，不含行號。
+ *
+ * handler 名進 ID 是因為同一個標籤上的同一個事件在同檔出現多次時，
+ * 綁不同 handler 就是不同的業務動作（例如兩顆 `<UtilButton @click>` 一顆存檔一顆刪除）；
+ * 少了它，兩者會撞成同一個 ID，只能靠序數區分而序數會隨程式碼調整位移。
+ */
+export function semanticId(rel: string, tag: string, event: string, handlerName?: string): string {
+  const base = `${rel}#${tag}.${event}`
+  return handlerName ? `${base}@${handlerName}` : base
+}
+
+/**
+ * 同檔內撞名的 ID 依文件順序加上 `~2`、`~3`。
+ *
+ * 撞名代表同檔有標籤、事件、handler 全同的兩個觸發點（例如 `v-for` 展開前的模板、
+ * 或同一顆按鈕在兩個分支裡各寫一次）。文件順序是唯一可用的 tiebreaker——
+ * 代價是在中間插入一個會讓後面的序數位移，那些章節會被 diff 判成 changed。
+ * 第一個不加後綴，所以最常見的「只有一個」情形不受影響。
+ */
+export function disambiguate(entries: EntryCandidate[]): void {
+  const seen = new Map<string, number>()
+  for (const entry of entries) {
+    const n = (seen.get(entry.id) ?? 0) + 1
+    seen.set(entry.id, n)
+    if (n > 1) entry.id = `${entry.id}~${n}`
+  }
+}
+
 export function scanSfc(ctx: DetectContext, sfc: ParsedSfc, facts: ScriptFacts): SfcScan {
   const scan: SfcScan = { entries: [], listeners: [], dynamicEventBindings: 0, unresolvedComponentTags: 0 }
   const domain = domainOf(sfc.rel)
 
   for (const hook of facts.lifecycle) {
     scan.entries.push({
-      id: `${sfc.rel}:${hook.line}:${hook.hook}`,
+      id: `${sfc.rel}#${hook.hook}`,
+      legacyId: `${sfc.rel}:${hook.line}:${hook.hook}`,
       kind: 'LIFECYCLE',
       domain,
       label: `${sfc.rel} ${hook.hook}()`,
@@ -120,7 +150,8 @@ export function scanSfc(ctx: DetectContext, sfc: ParsedSfc, facts: ScriptFacts):
 
       if (el.tagType === ElementTypes.ELEMENT) {
         scan.entries.push({
-          id: `${sfc.rel}:${line}:${el.tag}:${event}`,
+          id: semanticId(sfc.rel, el.tag, event, handlerName),
+          legacyId: `${sfc.rel}:${line}:${el.tag}:${event}`,
           kind: 'UI_EVENT',
           domain,
           label: `${sfc.rel} <${el.tag} @${event}>`,
@@ -152,7 +183,8 @@ export function scanSfc(ctx: DetectContext, sfc: ParsedSfc, facts: ScriptFacts):
         continue
       }
       scan.entries.push({
-        id: `${sfc.rel}:${line}:${el.tag}:${event}`,
+        id: semanticId(sfc.rel, normalizeTag(el.tag), event, handlerName),
+        legacyId: `${sfc.rel}:${line}:${el.tag}:${event}`,
         kind: 'UI_EVENT',
         domain,
         label: `${sfc.rel} <${el.tag} @${event}>`,
@@ -167,5 +199,7 @@ export function scanSfc(ctx: DetectContext, sfc: ParsedSfc, facts: ScriptFacts):
     }
   })
 
+  // 消歧的範圍是單一檔案——ID 已含檔案路徑，跨檔不可能撞名
+  disambiguate(scan.entries)
   return scan
 }

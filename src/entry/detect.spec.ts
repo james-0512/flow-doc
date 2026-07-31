@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { defaultVueConfig } from '../config.js'
 import { parseSfc } from '../load/sfc.js'
 import { extractScriptFacts } from '../load/script.js'
-import { domainOf, extractHandlerName, scanSfc, type DetectContext } from './detect.js'
+import type { EntryCandidate } from '../types.js'
+import {
+  disambiguate,
+  domainOf,
+  extractHandlerName,
+  scanSfc,
+  semanticId,
+  type DetectContext
+} from './detect.js'
 
 describe('extractHandlerName', () => {
   it.each([
@@ -14,6 +22,40 @@ describe('extractHandlerName', () => {
     ['e => onInput(e)', 'onInput']
   ])('%s → %s', (expr, expected) => {
     expect(extractHandlerName(expr)).toBe(expected)
+  })
+})
+
+describe('語意錨點 ID', () => {
+  it('不含行號——這是整個閉環的地基', () => {
+    const id = semanticId('src/views/Demo/IndexView.vue', 'UtilButton', 'click', 'save')
+    expect(id).toBe('src/views/Demo/IndexView.vue#UtilButton.click@save')
+    expect(id).not.toMatch(/:\d+/)
+  })
+
+  it('沒有 handler 名時仍可識別', () => {
+    expect(semanticId('a.vue', 'button', 'click')).toBe('a.vue#button.click')
+  })
+
+  it('同標籤同事件但 handler 不同 → 不同 ID', () => {
+    const save = semanticId('a.vue', 'UtilButton', 'click', 'save')
+    const remove = semanticId('a.vue', 'UtilButton', 'click', 'remove')
+    expect(save).not.toBe(remove)
+  })
+
+  it('完全撞名者依文件順序加序數，第一個不動', () => {
+    const entries = [
+      { id: 'a.vue#button.click@save' },
+      { id: 'a.vue#button.click@save' },
+      { id: 'a.vue#UtilModal.ok@submit' },
+      { id: 'a.vue#button.click@save' }
+    ] as EntryCandidate[]
+    disambiguate(entries)
+    expect(entries.map(e => e.id)).toEqual([
+      'a.vue#button.click@save',
+      'a.vue#button.click@save~2',
+      'a.vue#UtilModal.ok@submit',
+      'a.vue#button.click@save~3'
+    ])
   })
 })
 

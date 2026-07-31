@@ -54,7 +54,7 @@ describe('entry 偵測（fixture）', () => {
 
 describe('call chain 追蹤（fixture）', () => {
   it('save 追穿 SFC → store → api → HTTP，且標記為一條流程', () => {
-    const chain = chainOf('IndexView.vue:2:button:click')
+    const chain = chainOf('IndexView.vue#button.click')
     expect(chain.isFlow).toBe(true)
     expect(names(chain.root!)).toEqual(expect.arrayContaining(['save', 'submitDemo', 'createDemo']))
 
@@ -64,7 +64,7 @@ describe('call chain 追蹤（fixture）', () => {
   })
 
   it('router 導航與 store 呼叫都記成副作用', () => {
-    const chain = chainOf('IndexView.vue:2:button:click')
+    const chain = chainOf('IndexView.vue#button.click')
     expect(chain.effects.map(e => [e.kind, e.detail])).toEqual(
       expect.arrayContaining([
         ['ROUTER_NAV', 'DemoDone'],
@@ -74,7 +74,7 @@ describe('call chain 追蹤（fixture）', () => {
   })
 
   it('opaque 層記錄但不展開', () => {
-    const chain = chainOf('IndexView.vue:2:button:click')
+    const chain = chainOf('IndexView.vue#button.click')
     expect(chain.effects.find(e => e.kind === 'OPAQUE')?.detail).toContain('formatName')
     expect(names(chain.root!)).not.toContain('formatName')
   })
@@ -98,11 +98,11 @@ describe('call chain 追蹤（fixture）', () => {
   })
 
   it('寫入型與查詢型要分得開', () => {
-    expect(chainOf('IndexView.vue:2:button:click').flowKind).toBe('write')
+    expect(chainOf('IndexView.vue#button.click').flowKind).toBe('write')
   })
 
   it('handler 行號指回 .vue，不是虛擬檔', () => {
-    const chain = chainOf('IndexView.vue:2:button:click')
+    const chain = chainOf('IndexView.vue#button.click')
     expect(chain.root!.loc.file).toBe('src/views/Demo/IndexView.vue')
     expect(chain.root!.loc.line).toBe(19)
   })
