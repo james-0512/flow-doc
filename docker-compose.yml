@@ -1,0 +1,75 @@
+# 兩個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
+#   loop／publish  批次，跑完退出（restart: no），排程器用 `docker compose run --rm` 呼叫
+#   web            長駐 nginx，服務靜態站
+#
+# compose 不排程。排程是外部的：host 排程器或 CI cron 呼叫
+#   docker compose run --rm loop            # 跑一圈（PR 模式加 -- --pr）
+#   docker compose run --rm publish         # merge 後重建站台並原子換版
+#   docker compose up -d web                # 站台常駐
+#
+# 需要的環境變數放 .env（不進版控）：
+#   TARGET_REPO_PATH    目標 repo 在 host 的絕對路徑（掛 :ro；直接掛整個 repo，
+#                       node_modules 與 generated 檔就跟分析 baseline 的環境一致）
+#   FLOW_MANUALS_PATH   flow-manuals 在 host 的絕對路徑（唯一需要寫入的掛載）
+#   FLOW_DOC_TARGET_NAME 手冊 repo 內的目標目錄名（預設 mPHR_Frontend）
+#   ANTHROPIC_API_KEY   narrate 用（缺了照樣跑，章節進待補佇列）
+#   GH_TOKEN            PR 模式的 push／開 PR 用
+#   GIT_USER_NAME / GIT_USER_EMAIL  loop commit 的身份
+#   SITE_PORT           web 對外埠（預設 8080）
+#
+# Linux host 註記：容器以 root 寫入掛載的 flow-manuals 會留下 root 擁有的檔案，
+# 需要的話給 loop/publish 加 user: "1000:1000"（Windows/macOS 的 Docker Desktop 不受影響）。
+#
+# ⚠ Windows host 限制（實測）：目標 repo 的 pnpm node_modules 是 junction 結構，
+# 掛進 Linux 容器後 junction 斷掉，pinia 這類「靠 node_modules 型別」的解析全部失效——
+# 941/1894 條鏈的樹形改變，diff 滿江紅、熔斷器擋下。所以：
+#   - 生產環境的 loop 容器要跑在 Linux host（self-hosted runner），
+#     目標 repo 的 checkout 與 pnpm install 都在該機原生完成，baseline 也由容器產生
+#   - Windows 開發機要跑閉環，直接用原生 node（工作排程器＋ node dist/cli.js loop），
+#     容器只拿來 smoke 測 web／publish
+
+services:
+  loop:
+    build: .
+    image: flow-doc:latest
+    profiles: [batch]
+    restart: "no"
+    init: true
+    environment:
+      FLOW_DOC_TARGET: /target
+      FLOW_MANUALS_DIR: /manuals
+      FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+      GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
+    volumes:
+      - ${TARGET_REPO_PATH:?目標 repo 絕對路徑}:/target:ro
+      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+
+  publish:
+    image: flow-doc:latest
+    profiles: [batch]
+    restart: "no"
+    init: true
+    command: ["publish"]
+    environment:
+      FLOW_MANUALS_DIR: /manuals
+      FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
+      FLOW_DOC_SITE_TITLE: ${FLOW_DOC_SITE_TITLE:-}
+      SITE_VOLUME: /site
+    volumes:
+      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+      - site-dist:/site
+
+  web:
+    image: nginx:1.27-alpine
+    restart: always
+    ports:
+      - "${SITE_PORT:-8080}:80"
+    volumes:
+      - site-dist:/site:ro
+      - ./scripts/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  site-dist:

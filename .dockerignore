@@ -1,0 +1,8 @@
+node_modules
+dist
+site
+fixtures
+.git
+*.md
+!templates/**
+!.claude/skills/flow-manual/**

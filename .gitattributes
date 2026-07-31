@@ -1,0 +1,3 @@
+# 容器內執行的腳本必須是 LF——CRLF 的 shebang 在 Linux 直接炸
+*.sh text eol=lf
+Dockerfile text eol=lf
