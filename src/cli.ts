@@ -8,7 +8,16 @@ import { defaultTraceOptions, traceEntries } from './analyze/trace.js'
 import { defaultPackOptions, findPeers, groupByHandler, packFileName, packFlow, packOverviews } from './pack.js'
 import { buildSite, defaultSiteOptions, slugify } from './site.js'
 import { applyRenames, defaultDiffOptions, diffFlows, type ChangeKind } from './diff.js'
+import { countInputTokens, createComplete, defaultLlmOptions, describeApiError } from './llm.js'
 import { manualFileFor, readManualIndex } from './manuals.js'
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  defaultNarrateOptions,
+  findSkillRules,
+  narrateChapter,
+  withExistingFrontmatter
+} from './narrate.js'
 import { buildLineMap, mergeLineMaps, reanchorManual, type LineMap } from './reanchor.js'
 import { structureSignature } from './signature.js'
 import { detectRenames } from './version.js'
@@ -495,6 +504,146 @@ program
     }
     console.log(`\n下一步：對改動過的章節跑 verify，確認引用都落在新封包內。`)
   })
+
+program
+  .command('narrate')
+  .description('用 API 產出 changed／added 章節的敘述，verify 當驗收關（唯一花 token 的一步）')
+  .argument('<baseline>', '上一輪的 flow-chains.json')
+  .argument('[current]', '本次分析結果', 'flow-chains.json')
+  .option('-m, --manuals <dir>', '手冊敘述目錄', 'manuals')
+  .option('-p, --packets <dir>', '封包目錄', 'packets')
+  .option('-s, --skill <file>', 'flow-manual 的 SKILL.md（規則來源）')
+  .option('--model <id>', '模型', defaultLlmOptions.model)
+  .option('--effort <level>', 'low | medium | high | xhigh | max', defaultLlmOptions.effort)
+  .option('--max-tokens <n>', '單次生成上限（思考與輸出共用）', String(defaultLlmOptions.maxTokens))
+  .option('--retries <n>', '驗證失敗後的重試次數', String(defaultNarrateOptions.retries))
+  .option('--limit <n>', '最多寫幾章，避免一次燒掉預算')
+  .option('--only <substr>', '只處理 entryId 含此字串的章節')
+  .option('--dry-run', '只列出要寫哪幾章與預估輸入 token，不呼叫生成', false)
+  .action(
+    async (
+      baselineFile: string,
+      currentFile: string,
+      opts: {
+        manuals: string
+        packets: string
+        skill?: string
+        model: string
+        effort: string
+        maxTokens: string
+        retries: string
+        limit?: string
+        only?: string
+        dryRun: boolean
+      }
+    ) => {
+      for (const f of [baselineFile, currentFile]) {
+        if (!fs.existsSync(f)) {
+          console.error(`找不到 ${f}`)
+          process.exitCode = 1
+          return
+        }
+      }
+      const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf8')) as TraceResult
+      const current = JSON.parse(fs.readFileSync(currentFile, 'utf8')) as TraceResult
+      const index = readManualIndex(opts.manuals)
+      const diff = diffFlows(baseline, current, index, {
+        breakerThreshold: Number.MAX_SAFE_INTEGER,
+        renames: renamesBetween(baseline, current)
+      })
+      if (diff.verdict === 'upgrade') {
+        console.error(diff.reason)
+        process.exitCode = 1
+        return
+      }
+
+      const system = buildSystemPrompt(fs.readFileSync(findSkillRules(opts.skill), 'utf8'))
+      const byId = new Map([...current.chains, ...current.crosscut].map(c => [c.entryId, c]))
+      let targets = diff.work.rewrite
+      if (opts.only) targets = targets.filter(id => id.includes(opts.only!))
+      const dropped = opts.limit ? Math.max(0, targets.length - Number(opts.limit)) : 0
+      if (opts.limit) targets = targets.slice(0, Number(opts.limit))
+
+      console.log(`\n需重寫 ${diff.work.rewrite.length} 章，本次處理 ${targets.length} 章`)
+      // 上限必須看得見。靜默截斷會讓人以為「全部寫完了」
+      if (dropped > 0) console.log(`  （--limit 略過 ${dropped} 章，下次再跑）`)
+      if (targets.length === 0) return
+
+      let written = 0
+      let degraded = 0
+      const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+      try {
+      for (const entryId of targets) {
+        const chain = byId.get(entryId)
+        if (!chain) continue
+        const slug = slugify(entryId)
+        const packetFile = path.join(opts.packets, `${slug}.md`)
+        if (!fs.existsSync(packetFile)) {
+          console.log(`  ⚠ 找不到封包，略過：${slug}`)
+          continue
+        }
+        const packet = fs.readFileSync(packetFile, 'utf8')
+
+        if (opts.dryRun) {
+          const tokens = await countInputTokens(system, buildUserPrompt(packet), opts.model)
+          totals.input += tokens
+          console.log(`  ${slug}\n      封包 ${packet.length.toLocaleString()} 字元 · 輸入約 ${tokens.toLocaleString()} tokens`)
+          continue
+        }
+
+        const target = manualFileFor(index, entryId) ?? `${slug}.md`
+        const abs = path.join(opts.manuals, target)
+        const existing = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null
+
+        process.stdout.write(`  ${slug} … `)
+        const outcome = await narrateChapter(
+          { packet, repoRoot: current.repoRoot, system },
+          createComplete({ model: opts.model, effort: opts.effort, maxTokens: Number(opts.maxTokens) }),
+          { retries: Number(opts.retries) }
+        )
+        totals.input += outcome.usage.input
+        totals.output += outcome.usage.output
+        totals.cacheRead += outcome.usage.cacheRead
+        totals.cacheWrite += outcome.usage.cacheWrite
+
+        if (outcome.ok) {
+          fs.writeFileSync(abs, withExistingFrontmatter(existing, outcome.text), 'utf8')
+          written++
+          console.log(`通過（第 ${outcome.attempts} 次）`)
+          continue
+        }
+        // 驗證不過就不寫入——降級成「分析已更新、敘述待補」，site 本來就容忍這個狀態。
+        // 寧可少一章，也不要讓引用造假的敘述進手冊
+        degraded++
+        const why =
+          outcome.stopReason === 'max_tokens'
+            ? '輸出被 max_tokens 截斷（調高 --max-tokens）'
+            : outcome.stopReason === 'refusal'
+              ? '被安全分類器擋下'
+              : `${outcome.attempts} 次都沒通過驗證（${outcome.violations.length} 處問題）`
+        console.log(`未寫入 — ${why}`)
+        for (const v of outcome.violations.slice(0, 3)) console.log(`      ✗ ${v.reference} — ${v.detail}`)
+      }
+      } catch (err) {
+        // 已寫入的章節保留——中途失敗不該讓前面成功的白做，下次跑會跳過它們
+        console.error(`\n${describeApiError(err)}`)
+        if (written > 0) console.error(`（本次已寫入 ${written} 章，那些保留不動）`)
+        process.exitCode = 1
+        return
+      }
+
+      if (opts.dryRun) {
+        console.log(`\n（預演）輸入合計約 ${totals.input.toLocaleString()} tokens`)
+        return
+      }
+      console.log(`\n寫入 ${written} 章 · 降級待人工 ${degraded} 章`)
+      console.log(
+        `token：輸入 ${totals.input.toLocaleString()}（快取讀 ${totals.cacheRead.toLocaleString()}／寫 ${totals.cacheWrite.toLocaleString()}）· 輸出 ${totals.output.toLocaleString()}`
+      )
+      console.log(`\n下一步：flow-doc site 重產站台。降級的章節維持舊敘述，站上標為待補。`)
+    }
+  )
 
 program
   .command('verify')

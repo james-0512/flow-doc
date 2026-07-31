@@ -71,18 +71,15 @@ describe('verifyManual', () => {
     expect(verifyManual('見 `src/api/demo.ts:4`。', REPO, fresh).violations).toEqual([])
   })
 
-  it('手冊宣告 covers 的觸發位置算合法引用', () => {
+  it('封包列出的其他觸發點位置算合法引用', () => {
     // 一份敘述涵蓋多個控件（篩選、分頁、查詢鈕）是正確寫法，引用那些控件的位置
-    // 不該被當成臆測——covers: 就是作者的明確宣告
-    const packet = '- **createDemo** `src/api/demo.ts:3-5`'
-    const manual = [
-      '---',
-      'covers:',
-      '  - src/api/demo.ts:8:UtilButton:click',
-      '---',
-      '',
-      '另一個觸發點在 `src/api/demo.ts:8`。'
+    // 不該被當成臆測。放行的依據是**封包明列了它們的位置**——語意 ID 不含行號，
+    // 所以撰寫者只能從封包得知這些位置，verify 也只認封包這一個來源
+    const packet = [
+      '- **createDemo** `src/api/demo.ts:3-5`',
+      '> - `UtilButton` `@click`  `src/api/demo.ts:8`'
     ].join('\n')
+    const manual = ['---', 'covers:', '  - src/api/demo.ts#UtilButton.click@save', '---', '', '另一個觸發點在 `src/api/demo.ts:8`。'].join('\n')
     expect(verifyManual(manual, REPO, packet).violations).toEqual([])
   })
 

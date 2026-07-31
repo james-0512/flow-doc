@@ -35,6 +35,7 @@ cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 | `pack` | 把每條鏈序列化成自足的 Markdown 封包，供 LLM 撰寫敘述 |
 | `diff` | 比對 baseline 與本次分析，分成五類並算出要做的事 |
 | `reanchor` | 把只有位置變動的敘述機械改寫到新位置（0 token） |
+| `narrate` | 用 API 產出結構或主體變了的章節，verify 當驗收關 |
 | `site` | 產生 VitePress 站台 |
 | `verify` | 檢查生成的敘述沒有幻覺 |
 
@@ -44,6 +45,16 @@ cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 撰寫敘述用 `.claude/skills/flow-manual`：讀 `packets/*.md`，寫進 `manuals/<entryId slug>.md`。
 這份 skill 是「源」，各手冊 repo 的 `.claude/skills/` 有一份複本；改規則只改這裡，
 再依 [LOOP.md](LOOP.md) 的升版圈同步過去。
+
+`narrate` 是同一件事的無人值守版本——**system prompt 就是這份 SKILL.md**，
+所以互動式與自動化用的是同一套硬規則，不會各自漂移。它需要 API 憑證
+（`ANTHROPIC_API_KEY`，或 `ant auth login` 後的 profile）：
+
+```bash
+flow-doc narrate <baseline.json> --dry-run
+```
+
+先用 `--dry-run` 看要寫幾章、輸入約多少 token，再拿掉它實際跑；`--limit` 可限制單次章數。
 
 ## 預覽站台
 

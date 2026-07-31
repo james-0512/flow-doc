@@ -227,16 +227,18 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 
 現成：`trace`／`pack`／`site`／`verify`（含 exit code，天生 CI gate）、CLI 的 `bin`
 與設定解析、每個目標自帶設定的手冊 repo（D9）、語意 ID 與 baseline metadata（D10）、
-`flow-doc diff` 五分類＋熔斷＋版本比對（D11）、**`flow-doc reanchor` 與 git rename
-偵測（D12）**。缺兩件，依序：
+`flow-doc diff` 五分類＋熔斷＋版本比對（D11）、`flow-doc reanchor` 與 git rename
+偵測（D12）、**`flow-doc narrate`（D13）**。缺一件：
 
-1. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關。
-   這是唯一還需要人在迴圈裡的一步
-2. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
+1. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
    （每個目標一條 pipeline 實例）
 
-**0-token 的那條路徑已經端到端跑通**：`trace → diff → reanchor → verify`
-全部是確定性的，不需要 LLM。純 moved 的輪次現在就能全自動完成。
+**分析與生成的指令都齊了**：`trace → diff →`（`reanchor` 或 `narrate`）`→ verify → site`。
+0-token 的那條路徑（純 moved）完全確定性；需要 LLM 的那條由 verify 把關，
+不過就降級待人工，絕不寫入。
+
+narrate 需要 API 憑證（`ANTHROPIC_API_KEY` 或 `ant auth login` 的 profile）——
+容器化那節列的「兩組憑證」其中一組就是它。
 
 ## 成本輪廓與殘餘風險
 
