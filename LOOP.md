@@ -20,9 +20,13 @@ flowchart TD
     C --> V
     R --> V
     V -.->|"個別 fail（重試 2 次仍紅）"| Q["待人工佇列<br>該章降級「分析已更新、敘述待補」"]
-    V --> S["site build → 部署<br>原子換版＋本次變更頁"]
-    S --> B["manuals＋chains.json commit 回手冊 repo<br>成為下一輪 baseline"]
-    B -.-> T
+    V --> B["commit manuals＋baseline<br>→ push branch → 開 PR"]
+    B --> H{"有 LLM 產出？"}
+    H -->|"否（純 moved）"| MG["自動合併"]
+    H -->|"是"| PR["人審 PR<br>擋 verify 擋不住的語意寫歪"]
+    PR --> MG
+    MG --> S["merge 後：site build<br>原子換版到共用 volume"]
+    MG -.->|"新 baseline 生效"| T
 ```
 
 ## diff 五分類——調度核心
@@ -65,8 +69,8 @@ moved 佔日常 commit 的絕大多數——這是平常一圈幾乎不花 token
 2. **熔斷器。** diff 顯示需重寫章數超過門檻（預設 30，可調）——典型是資料夾改名、大重構——
    整輪停下、出報告、等人工核可再燒 token。
 3. **狀態存在 git。** 每圈結束把 manuals＋chains.json commit 回該目標的手冊 repo（見下節）：
-   回滾＝revert，歷史可稽核。醫療場景起步用 **PR 模式**（每圈開 PR、人審後 merge 部署）；
-   純 moved 的輪次可自動合併，跑順後逐步放寬。
+   回滾＝revert，歷史可稽核。**採 PR 模式**——每圈開 PR、人審後 merge 才部署站台；
+   純 moved 的輪次（0 token、無 LLM 產出）自動合併。細節見〈容器化〉。
 
 ## 多目標與資料存放：工具與資料分離（**已實作**，見 DECISIONS D9）
 
@@ -93,7 +97,8 @@ flow-doc 是工具，不綁定單一目標；`C:\project` 下有二十幾個前�
 
 CLI 已支援：設定檔 `--config` > CWD > 目標 repo 根；目標 repo 命令列 > `FLOW_DOC_TARGET`
 > 設定檔 `target`（相對設定檔目錄解析，手冊 repo 可整個搬家）。日常操作是
-`cd flow-manuals/<目標> && flow-doc trace`，CI 用環境變數覆寫 checkout 路徑。
+`cd flow-manuals/<目標> && flow-doc trace`；**CI 與容器用 `FLOW_DOC_TARGET` 覆寫**——
+checkout 路徑與掛載佈局每次都可能不同，但不該汙染版控中的設定檔。
 
 **不做 pnpm workspace**：`site/` 是 gitignore 的生成目錄，workspace glob 指向生成物很脆弱；
 各 site 獨立 `pnpm install` 即可。
@@ -138,6 +143,75 @@ analyzer 規則一改，diff 會把幾百條流程誤報成 changed——行為�
 失敗通知、artifacts、PR 整合。設計刻意不耦合平台——GitHub Actions／Azure DevOps／
 GitLab 的 scheduled pipeline 同構。
 
+## 容器化：兩個服務，PR 模式
+
+批次與服務是**兩個生命週期完全不同的東西**，不能塞進同一個容器：
+
+| 服務 | 生命週期 | 做什麼 |
+|---|---|---|
+| `loop`（批次） | `restart: no`，跑完退出 | 分析 → diff → 產敘述 → 開 PR |
+| `web`（長駐） | `restart: always` | nginx 服務靜態站，24h 開著 |
+
+兩者用**具名 volume** 交換站台產物。不可以邊 build 邊服務同一個目錄——
+build 到暫存目錄再原子換版，否則使用者會讀到半套站。
+
+**compose 不排程。** 它只定義服務；排程是外部的——host 排程器呼叫
+`docker compose run --rm loop`，或 CI 排程、compose 只提供 runner 映像。
+
+### 三個掛載，權限不同
+
+| 對象 | 做法 | 為什麼 |
+|---|---|---|
+| flow-doc（工具） | **烤進映像檔**，不 runtime 拉取 | 映像檔 tag ＝ analyzer 版本。runtime 拉會讓表示法每晚可能靜默改變，把「升版圈」變成天天意外發生 |
+| 目標 repo | 掛載 **read-only**（`:ro`） | 分析器只讀不寫，這是能被強制執行的安全性質 |
+| flow-manuals | read-write（或容器內 clone + push） | 唯一需要寫入的東西 |
+
+**路徑用 `FLOW_DOC_TARGET` 覆寫**，不要動版控裡的 `target` 欄位——設定檔的相對路徑
+是照 host 佈局寫的，容器掛載佈局不同就會指錯。忘了設會直接報
+「找不到目標 repo：…（來源：config）」，不會靜默分析錯東西。
+
+**兩組憑證進 secret**：git identity＋push 憑證（commit 那步）、LLM API key（narrate 那步）。
+這是容器化真正新增的複雜度。
+
+**node_modules 要一致。** 分析器不需要目標的依賴（`createAnalysisProgram` 刻意不用目標
+tsconfig，模組解析靠 `baseUrl`＋alias；`fixtures/mini-vue` 完全沒有 node_modules 也能追完整條鏈）。
+但**有裝與沒裝，「解析不到定義」的計數會不同**，那個數字寫在封包標頭裡，會造成
+packet diff → 觸發不必要的重寫。流程分類不受影響，但 diff 會有雜訊。
+現有 baseline 是在有 node_modules 的環境產生的，容器直接掛整個目標 repo 最省事；
+若改走乾淨 checkout，記得重新產一次 baseline 當新起點。
+
+### 一圈的實際順序
+
+```
+排程觸發（host 排程器 / CI）
+  └─ docker compose run --rm loop        ← 先取 lockfile，防重入
+       1. fetch 目標 repo（:ro）、clone flow-manuals（要完整歷史，之後要 commit）
+       2. 比對 baseline commit hash ── 沒動 → 直接退出，連 trace 都不跑
+       3. flow-doc trace + pack            ← diff 的前提：先有新分析結果才能比
+       4. flow-doc diff：五分類 + 熔斷 + analyzer 版本比對
+            moved   → reanchor（0 token）
+            changed → LLM 重寫 → verify（重試 2 次，仍紅則降級待人工）
+            added   → LLM 新寫 → verify
+            removed → 歸檔
+       5. commit manuals + 新 baseline → push branch → 開 PR
+                                          ← 缺這步閉環就斷：下一輪沒有 baseline，
+                                            全部流程會被判成 added，每晚重寫整本手冊
+  ── 人審 PR ──
+  └─ merge 後觸發：flow-doc site → vitepress build → 原子換版到共用 volume
+```
+
+### PR 模式（定案）
+
+**站台部署掛在 merge 之後，不掛在批次結束。** 理由是 verify 擋得住引用造假與漏寫
+副作用，**擋不住「引用全對但語意寫歪」**——醫療業務手冊被當成事實依據使用，
+這個殘餘風險要用人審補，這也是本閉環與全自動 wiki 在可信度上的分界線。
+
+折衷讓日常不卡人：**純 moved 的輪次自動合併**（0 token、只機械改行號、無 LLM 產出，
+verify 全綠即可放行），**有 LLM 產出的輪次才走人審**。多數輪次因此仍是全自動，
+只有真的動到敘述時才叫人。跑順之後再逐步放寬。
+
+PR 描述直接用「本次變更頁」的內容（見下節），審查者一眼看到這一版動了哪些業務流程。
+
 ## 副產品：本次變更頁
 
 diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務流程、哪幾章待補。
@@ -152,7 +226,8 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 2. `flow-doc diff`——五分類＋熔斷判定＋analyzer 版本比對
 3. `flow-doc reanchor`——moved 章節的行號機械改寫
 4. `flow-doc narrate --llm=api`——SKILL.md 硬規則轉 API prompt，verify 當驗收關
-5. CI wiring——self-hosted runner、lockfile、PR 模式（每個目標一條 pipeline 實例）
+5. CI／容器 wiring——loop 與 web 兩個服務、lockfile、PR 模式與自動合併判定
+   （每個目標一條 pipeline 實例）
 
 ## 成本輪廓與殘餘風險
 
