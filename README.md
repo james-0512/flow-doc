@@ -6,7 +6,8 @@
 核心能力是 call chain tracing，不是 dependency graph。
 
 目標專案是 [mPHR_Frontend](file:///C:/project/mPHR_Frontend)（Vue 3 + TS + Pinia）。
-設計決策與其理由記在 [DECISIONS.md](DECISIONS.md)，分析看不到的東西記在 [LIMITATIONS.md](LIMITATIONS.md)。
+設計決策與其理由記在 [DECISIONS.md](DECISIONS.md)，分析看不到的東西記在 [LIMITATIONS.md](LIMITATIONS.md)，
+閉環（手冊自動跟著 main 更新）的設計記在 [LOOP.md](LOOP.md)（尚未實作）。
 
 ## 管線
 
