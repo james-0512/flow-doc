@@ -64,6 +64,10 @@ docker compose run --rm publish && docker compose up -d web    # http://localhos
 
 容器裡不帶 `--pr` 的話 loop 只會在 volume 裡 commit，沒有人看得到。
 
+上面這些都有對應的 npm script（`pnpm docker:bootstrap`、`docker:loop`、`docker:publish`
+…完整清單見 `package.json`）。另有 `docker:shell`（跳過 entrypoint 進容器翻 volume）
+與 `docker:reset`（`down -v`，砍掉三顆 volume 重來——clone 與 install 都要重跑）。
+
 exit code：0 完成或早退 · 1 錯誤 · 2 需人工（升版圈／熔斷）· 3 這輪沒跑（鎖／dirty／缺 generated 檔）。
 
 ## 已知待處理（不阻塞）
