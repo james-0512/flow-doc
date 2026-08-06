@@ -163,16 +163,21 @@ build 到暫存目錄再原子換版，否則使用者會讀到半套站。
 **compose 不排程。** 它只定義服務；排程是外部的——host 排程器呼叫
 `docker compose run --rm loop`，或 CI 排程、compose 只提供 runner 映像。
 
-### 三個掛載，權限不同
+### 三個對象，三種進到容器的方式
 
 | 對象 | 做法 | 為什麼 |
 |---|---|---|
 | flow-doc（工具） | **烤進映像檔**，不 runtime 拉取 | 映像檔 tag ＝ analyzer 版本。runtime 拉會讓表示法每晚可能靜默改變，把「升版圈」變成天天意外發生 |
-| 目標 repo | 掛載 **read-only**（`:ro`） | 分析器只讀不寫，這是能被強制執行的安全性質 |
-| flow-manuals | read-write（或容器內 clone + push） | 唯一需要寫入的東西 |
+| 目標 repo | **容器內 clone** 到常駐 volume（D15） | 連 node_modules 都在容器內裝，分析環境因此與 host 平台無關 |
+| flow-manuals | 容器內 clone，commit 後 push | 唯一需要寫出去的東西 |
+
+目標 repo 原本是 host 路徑掛 `:ro`（「分析器只讀不寫」是能被強制執行的性質）。
+改成容器內 clone 之後那個 `:ro` 沒了——換來的保證是**它本來就是拋棄式副本**：
+volume 裡的 clone 不是任何人的工作目錄，寫壞了刪掉重來即可，而 install 與 codegen
+本來就必須寫進去。使用者真正的 repo 從頭到尾沒有被容器碰過。
 
 **路徑用 `FLOW_DOC_TARGET` 覆寫**，不要動版控裡的 `target` 欄位——設定檔的相對路徑
-是照 host 佈局寫的，容器掛載佈局不同就會指錯。忘了設會直接報
+是照 host 佈局寫的，容器裡的佈局不同就會指錯。忘了設會直接報
 「找不到目標 repo：…（來源：config）」，不會靜默分析錯東西。
 
 **兩組憑證進 secret**：git identity＋push 憑證（commit 那步）、LLM API key（narrate 那步）。
@@ -183,27 +188,57 @@ build 到暫存目錄再原子換版，否則使用者會讀到半套站。
 不會有它。少了它，全域註冊元件的標籤全部解析不到檔案——實測同一個 commit 的流程數
 從 901 變成 940。`loop` 對此直接拒跑（exit 3）而不是只警告。實際的 codegen 指令是
 `pnpm generate:components-dts`（用 middleware mode 起 vite 再關掉，借 unplugin 的掃描產檔），
-**需要目標完整的 node_modules**——CI workflow 已內建 `pnpm install ＋ codegen` 前置步。
+**需要目標完整的 node_modules**——容器進入點在 clone 之後、跑 loop 之前內建這兩步
+（`TARGET_INSTALL_CMD`／`TARGET_CODEGEN_CMD`，可覆寫）。
 
 **node_modules 要一致。** 分析器不需要目標的依賴（`createAnalysisProgram` 刻意不用目標
 tsconfig，模組解析靠 `baseUrl`＋alias；`fixtures/mini-vue` 完全沒有 node_modules 也能追完整條鏈）。
 有裝與沒裝會讓「解析不到定義」的計數不同，那個數字寫在封包標頭裡——結構簽章刻意
-不收它，所以不會誤判成 changed，但封包內容仍會有差異。容器直接掛整個目標 repo 最省事。
+不收它，所以不會誤判成 changed，但封包內容仍會有差異。
 
-**⚠ 但「掛整個 repo」在 Windows host 上不成立（實測，見 D14）。** pnpm 的 node_modules
-是 junction 結構，junction 的絕對路徑目標在 Linux 容器裡是斷鏈——pinia 這類「靠
-node_modules 型別」的解析全部失效，941/1894 條鏈樹形改變，diff 滿江紅、熔斷器擋下
-（防呆二的第一次真實出動，一個檔案都沒寫）。所以 **baseline 必須與分析環境同源**：
-生產的 loop 容器跑在 Linux runner（目標 checkout 與 pnpm install 原生完成、baseline 由
-容器產生）；Windows 開發機用原生 node 跑 `flow-doc loop`，容器只拿來跑 publish／web。
-`flow-chains.json` 的 metadata 記 `platform`，跨平台 diff 前 loop 會明白警告。
+**⚠ 而「一致」不是把 host 的 node_modules 掛進來就有（實測，見 D14）。** pnpm 的
+node_modules 是 junction 結構，junction 的絕對路徑目標在 Linux 容器裡是斷鏈——pinia
+這類「靠 node_modules 型別」的解析全部失效，941/1894 條鏈樹形改變，diff 滿江紅、
+熔斷器擋下（防呆二的第一次真實出動，一個檔案都沒寫）。結論是 **baseline 必須與分析
+環境同源**，而做法就是下一節：連 clone 帶 install 都在容器內完成。
+`flow-chains.json` 的 metadata 記 `platform`，跨環境 diff 前 loop 會明白警告。
+
+### repo 由容器自己取（**已實作**，見 DECISIONS D15）
+
+compose 只收 git URL，容器 clone／fetch 到常駐 volume：第一次完整 clone＋install，
+之後只 fetch＋快轉，lockfile 沒變就跳過安裝。host 上不需要準備任何東西。
+
+這正好解掉上面那個坑——node_modules 由容器自己裝，佈局必然與分析環境同源，
+**host 是什麼平台都不影響**，Windows 機也能跑 loop 容器。代價是第一輪較慢。
+
+四件事刻意這樣做：
+
+- **不淺 clone。** 改名偵測要 `baseline..HEAD` 的歷史，不夠時 `detectRenames`
+  回空表，改名退化成 removed＋added——不報錯，只是多花 LLM 的錢。
+- **快轉用 `--ff-only`，不用 `reset --hard`。** 非 PR 模式的 loop 會在手冊 repo 留
+  本地 commit 且不推，這時本地領先遠端，ff-only 是 no-op；真的分岔就停下來喊人。
+- **install 的 stamp 放在 repo 外。** 放進工作樹會多出 untracked 檔，
+  `git status --porcelain` 看得到，loop 會判定目標 dirty 而拒跑。
+- **loop 與 publish 用各自的 volume。** publish 要的是 merge 後的 origin 狀態，
+  而 loop 的工作區可能停在 PR 分支或有未推的 commit。推論是**站台只反映已推上
+  origin 的手冊**——要預覽還沒推的本地修改，用原生 `site` 指令，不要走 publish。
+
+**⚠ 首次啟用要先跑 `bootstrap` 模式。** platform 與模組解析結果都寫在
+`flow-chains.json` 裡，換分析環境的第一輪會大量 changed 被熔斷器擋下（不會寫壞
+東西，但那輪白跑）。而 loop 刻意不自我初始化（沒 baseline 就 exit 2），分析環境
+又只存在於容器內——所以 entrypoint 有第三個模式 `bootstrap`：prepare → trace ＋
+pack → 開分支 commit → PR。合併之後 loop 才有比對基準。已有 baseline 時要 `--force`。
+
+**⚠ 容器裡的 loop 要帶 `--pr`。** 不帶只在本地 commit 不 push，而容器的「本地」是
+volume——沒人看得到，下一輪 `--ff-only` 也不會動它（本地領先），只會愈積愈多。
 
 ### 一圈的實際順序
 
 ```
 排程觸發（host 排程器 / CI）
-  └─ docker compose run --rm loop        ← 先取 lockfile，防重入
-       1. fetch 目標 repo（:ro）、clone flow-manuals（要完整歷史，之後要 commit）
+  └─ docker compose run --rm loop
+       0. clone／fetch 兩個 repo（完整歷史）、目標 install＋codegen  ← entrypoint
+       1. 取 lockfile，防重入
        2. 比對 baseline commit hash ── 沒動 → 直接退出，連 trace 都不跑
        3. flow-doc trace + pack            ← diff 的前提：先有新分析結果才能比
        4. flow-doc diff：五分類 + 熔斷 + analyzer 版本比對

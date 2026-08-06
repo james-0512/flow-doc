@@ -26,6 +26,9 @@ RUN apt-get update \
   && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@9.15.6 --activate
+# 遠端模式會在目標 repo 裡跑 pnpm。目標若用 packageManager 釘了別的版本，corepack
+# 會去下載——互動式確認在無 tty 的批次裡等於卡死，關掉它讓 corepack 直接下載。
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./

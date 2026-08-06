@@ -1,34 +1,45 @@
+# repo 一律由容器自己 clone／fetch 到常駐 volume——host 上什麼都不用先準備。
+# （曾經有個 bind mount host 路徑的「掛載模式」，已移除，理由見 DECISIONS D15。）
+#
 # 兩個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
 #   loop／publish  批次，跑完退出（restart: no），排程器用 `docker compose run --rm` 呼叫
 #   web            長駐 nginx，服務靜態站
 #
 # compose 不排程。排程是外部的：host 排程器或 CI cron 呼叫
-#   docker compose run --rm loop            # 跑一圈（PR 模式加 -- --pr）
+#   docker compose run --rm loop bootstrap  # 只做一次：產生第一份 baseline 並開 PR
+#   docker compose run --rm loop -- --pr    # 跑一圈（容器裡請一律用 --pr，見下）
 #   docker compose run --rm publish         # merge 後重建站台並原子換版
 #   docker compose up -d web                # 站台常駐
 #
+# ⚠ 容器裡跑 loop 要帶 `--pr`。不帶的話 loop 只在本地 commit、不 push，而這裡的
+#   「本地」是容器的 volume——沒有人看得到，下次 fetch 也只會讓它愈積愈多。
+#
 # 需要的環境變數放 .env（不進版控）：
-#   TARGET_REPO_PATH    目標 repo 在 host 的絕對路徑（掛 :ro；直接掛整個 repo，
-#                       node_modules 與 generated 檔就跟分析 baseline 的環境一致）
-#   FLOW_MANUALS_PATH   flow-manuals 在 host 的絕對路徑（唯一需要寫入的掛載）
+#   TARGET_REPO_URL / TARGET_REPO_REF      目標 repo 的 git URL 與分支（ref 預設 main）
+#   MANUALS_REPO_URL / MANUALS_REPO_REF    flow-manuals 的 git URL 與分支（ref 預設 main）
+#   TARGET_INSTALL_CMD / TARGET_CODEGEN_CMD  目標的安裝與 codegen 指令（有預設值；
+#                       設成空字串代表不做，例如目標不是 pnpm 專案）
 #   FLOW_DOC_TARGET_NAME 手冊 repo 內的目標目錄名（預設 mPHR_Frontend）
 #   ANTHROPIC_API_KEY   narrate 用（缺了照樣跑，章節進待補佇列）
-#   GH_TOKEN            PR 模式的 push／開 PR 用
+#   GH_TOKEN            私有 repo 的 clone、以及 PR 模式的 push／開 PR
 #   GIT_USER_NAME / GIT_USER_EMAIL  loop commit 的身份
 #   SITE_PORT           web 對外埠（預設 8080）
 #
-# Linux host 註記：容器以 root 寫入掛載的 flow-manuals 會留下 root 擁有的檔案，
-# 需要的話給 loop/publish 加 user: "1000:1000"（Windows/macOS 的 Docker Desktop 不受影響）。
+# URL 沒填不會在這裡擋（擋了連 `up -d web` 都跑不起來，compose 的 ${VAR:?} 是
+# 載入時檢查、不管你叫的是哪個服務）——改由 entrypoint 在真正要用時報錯。
 #
-# ⚠ Windows host 限制（實測）：目標 repo 的 pnpm node_modules 是 junction 結構，
-# 掛進 Linux 容器後 junction 斷掉，pinia 這類「靠 node_modules 型別」的解析全部失效——
-# 941/1894 條鏈的樹形改變，diff 滿江紅、熔斷器擋下。所以：
-#   - 生產環境的 loop 容器要跑在 Linux host（self-hosted runner），
-#     目標 repo 的 checkout 與 pnpm install 都在該機原生完成，baseline 也由容器產生
-#   - Windows 開發機要跑閉環，直接用原生 node（工作排程器＋ node dist/cli.js loop），
-#     容器只拿來 smoke 測 web／publish
+# clone 是**完整歷史**，不淺層：diff 的改名偵測要 baseline..HEAD 的歷史，不夠時
+# 改名會退化成 removed＋added——不報錯，只是多花 LLM 的錢。
+#
+# ⚠ 目標 repo 的分析環境（node_modules）由容器內的 install 產生，與 host 平台無關。
+#   D14 那個「Windows 的 pnpm junction 掛進 Linux 容器會斷鏈」的坑因此不存在，
+#   Windows 機也能跑 loop 容器。但**首次啟用要重做 baseline**：flow-chains.json 記著
+#   platform 與該環境的模組解析結果，換環境的第一輪會大量 changed 被熔斷器擋下
+#   （不會寫壞東西，但那輪白跑）。先在容器內跑一次 trace＋pack 並 commit。
 
 services:
+  # workspace volume 常駐，跨輪保留 clone、node_modules 與 pnpm store：
+  # 第一次跑要完整 clone＋install（慢），之後只 fetch＋快轉，lockfile 沒變就跳過安裝。
   loop:
     build: .
     image: flow-doc:latest
@@ -36,17 +47,31 @@ services:
     restart: "no"
     init: true
     environment:
-      FLOW_DOC_TARGET: /target
-      FLOW_MANUALS_DIR: /manuals
+      FLOW_DOC_TARGET: /workspace/target
+      FLOW_MANUALS_DIR: /workspace/manuals
+      TARGET_REPO_URL: ${TARGET_REPO_URL:-}
+      TARGET_REPO_REF: ${TARGET_REPO_REF:-main}
+      MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
+      MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
+      TARGET_INSTALL_CMD: ${TARGET_INSTALL_CMD-pnpm install --frozen-lockfile}
+      TARGET_CODEGEN_CMD: ${TARGET_CODEGEN_CMD-pnpm generate:components-dts}
+      # pnpm store 放同一顆 volume：跨輪留著，而且要與 node_modules 同一個檔案系統
+      # 才能走硬連結（不同 fs 會退化成整包複製）
+      npm_config_store_dir: /workspace/.pnpm-store
       FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GH_TOKEN: ${GH_TOKEN:-}
       GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
       GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
     volumes:
-      - ${TARGET_REPO_PATH:?目標 repo 絕對路徑}:/target:ro
-      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+      - workspace:/workspace
 
+  # 獨立 volume，不與 loop 共用：publish 要的是 merge 後的 origin 狀態，而 loop 的
+  # 工作區可能停在 PR 分支、或有還沒推的本地 commit。手冊 repo 很小，多一份 clone
+  # 比兩個批次搶同一棵樹便宜。
+  #
+  # 推論：站台只反映**已推上 origin 的**手冊。要預覽還沒推的本地修改，用原生
+  # `flow-doc site -m manuals` 加 vitepress dev，不要走這條。
   publish:
     image: flow-doc:latest
     profiles: [batch]
@@ -54,12 +79,15 @@ services:
     init: true
     command: ["publish"]
     environment:
-      FLOW_MANUALS_DIR: /manuals
+      FLOW_MANUALS_DIR: /publish-workspace/manuals
+      MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
+      MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
       FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
       FLOW_DOC_SITE_TITLE: ${FLOW_DOC_SITE_TITLE:-}
       SITE_VOLUME: /site
+      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
-      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+      - publish-workspace:/publish-workspace
       - site-dist:/site
 
   web:
@@ -73,3 +101,5 @@ services:
 
 volumes:
   site-dist:
+  workspace:
+  publish-workspace:

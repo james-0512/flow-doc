@@ -12,3 +12,6 @@ packets/
 # 站台是產物，可由 flow-chains.json + manuals/ 重新產生。
 # manuals/ 是人／LLM 撰寫的敘述，要進版控。
 site/
+
+# docker-compose 的環境變數（含 API key 與 host 路徑）
+.env
