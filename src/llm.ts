@@ -44,6 +44,16 @@ export const defaultLlmOptions: LlmOptions = {
 export type LlmProvider = 'api' | 'subscription'
 
 /**
+ * 訊息本身已經寫清楚該做什麼的錯誤。
+ *
+ * `describeApiError` 會用關鍵字猜錯誤類型再換成建議訊息，而這類錯誤的內文本來就
+ * 含有 `ANTHROPIC_API_KEY` 這種關鍵字——不特別標記的話會被它整段蓋掉。
+ */
+export class ActionableError extends Error {
+  override readonly name = 'ActionableError'
+}
+
+/**
  * 決定用哪個 provider：有 API 憑證就走 API，沒有就退回訂閱方案。
  *
  * 判斷只看**環境變數**，不看 `ant auth login` 的 profile——profile 是給 SDK 自己
@@ -132,29 +142,42 @@ export function createApiComplete(options: LlmOptions = defaultLlmOptions): Comp
  */
 export function createSubscriptionComplete(options: LlmOptions = defaultLlmOptions): Complete {
   return async ({ system, user }) => {
-    const { query } = await import('@anthropic-ai/claude-agent-sdk')
     let assistantText = ''
     let result: SDKResultMessage | null = null
 
-    for await (const message of query({
-      prompt: user,
-      options: {
-        model: options.model,
-        systemPrompt: system,
-        effort: options.effort as EffortLevel,
-        maxTurns: 1,
-        allowedTools: [],
-        permissionMode: 'dontAsk',
-        settingSources: []
-      }
-    })) {
-      if (message.type === 'assistant') {
-        for (const block of message.message.content) {
-          if (block.type === 'text') assistantText += block.text
+    try {
+      const { query } = await import('@anthropic-ai/claude-agent-sdk')
+      for await (const message of query({
+        prompt: user,
+        options: {
+          model: options.model,
+          systemPrompt: system,
+          effort: options.effort as EffortLevel,
+          maxTurns: 1,
+          allowedTools: [],
+          permissionMode: 'dontAsk',
+          settingSources: []
         }
-      } else if (message.type === 'result') {
-        result = message
+      })) {
+        if (message.type === 'assistant') {
+          for (const block of message.message.content) {
+            if (block.type === 'text') assistantText += block.text
+          }
+        } else if (message.type === 'result') {
+          result = message
+        }
       }
+    } catch (err) {
+      // 這條路在容器裡是走不通的（image 沒裝平台 binary，也沒有 Claude Code 登入），
+      // 而 .env 的 ANTHROPIC_API_KEY 空著就會落到這裡。底層錯誤是「找不到執行檔」
+      // 之類的訊息，看不出真正該做什麼——把該做的事講出來，原始錯誤保留在後面
+      throw new ActionableError(
+        `訂閱方案這條路啟動失敗。\n` +
+          `  這條路只在**本機**成立（要有 Claude Code 登入與平台 binary）。\n` +
+          `  容器裡請在 .env 填 ANTHROPIC_API_KEY——image 刻意不裝那個 267 MB 的 binary（D16）。\n` +
+          `  原始訊息：${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      )
     }
 
     if (!result) {
@@ -190,6 +213,8 @@ export function createSubscriptionComplete(options: LlmOptions = defaultLlmOptio
  */
 export function describeApiError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err)
+  // 已經寫清楚該做什麼的，原樣放行——底下的關鍵字比對會誤判它的內文
+  if (err instanceof ActionableError) return message
   const status = (err as { status?: number } | null)?.status
   if (status === 401 || /api[_ ]?key|authentication|oauth|not logged in/i.test(message)) {
     return (

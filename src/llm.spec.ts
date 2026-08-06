@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveProvider } from './llm.js'
+import { ActionableError, describeApiError, resolveProvider } from './llm.js'
 
 /**
  * provider 判定是「這輪要不要花錢、花誰的錢」的分岔點，而且只吃環境變數——
@@ -35,5 +35,25 @@ describe('resolveProvider', () => {
   it('拼錯的值直接報錯，不要靜靜地當成沒設', () => {
     expect(() => resolveProvider({ FLOW_DOC_LLM_PROVIDER: 'API' })).toThrow(/只能是 api 或 subscription/)
     expect(() => resolveProvider({ FLOW_DOC_LLM_PROVIDER: 'claude-code' })).toThrow(/收到：claude-code/)
+  })
+})
+
+describe('describeApiError', () => {
+  it('認證類錯誤換成三種設法的建議', () => {
+    const out = describeApiError(Object.assign(new Error('401 unauthorized'), { status: 401 }))
+    expect(out).toMatch(/找不到可用的憑證/)
+    expect(out).toMatch(/ANTHROPIC_API_KEY/)
+  })
+
+  it('已經寫清楚該做什麼的錯誤原樣放行——即使內文含 ANTHROPIC_API_KEY', () => {
+    // 這是實際踩過的坑：訂閱路徑的啟動失敗訊息裡就有這個關鍵字，
+    // 沒有 ActionableError 標記的話會被上面那條規則整段蓋掉，容器的指引就消失了
+    const actionable = new ActionableError('訂閱方案這條路啟動失敗。容器裡請在 .env 填 ANTHROPIC_API_KEY')
+    expect(describeApiError(actionable)).toBe(actionable.message)
+    expect(describeApiError(actionable)).not.toMatch(/三種設法/)
+  })
+
+  it('速率上限有自己的建議', () => {
+    expect(describeApiError(Object.assign(new Error('too many'), { status: 429 }))).toMatch(/降低 --limit/)
   })
 })
