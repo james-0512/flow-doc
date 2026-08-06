@@ -443,11 +443,19 @@ junction 斷鏈的根因是「node_modules 在 host 裝、拿到容器裡用」�
 都跑（冪等、相對便宜，且它缺了 loop 會 exit 3）。pnpm store 放同一顆 volume：
 跨輪留著，而且要與 node_modules 同檔案系統才走得了硬連結。
 
-### 順帶修掉的：模式參數把旗標吃掉
+### 順帶修掉的：旗標傳不進去（兩層）
 
 entrypoint 原本無條件把 `$1` 當模式名，於是 `docker compose run --rm loop -- --pr`
 會報「未知模式：--pr」——文件裡寫著的指令其實跑不起來。改成只有不以 `-` 開頭的
 第一個參數才算模式，其餘全部轉交底下的 CLI。
+
+改完還是不通，第二層才是真兇：**compose 把服務名之後的東西原封不動往容器傳，
+包括 `--` 本身**（實測 `--entrypoint echo` 確認；`--dry-run` 這種與 compose 同名的
+旗標也一樣不被攔截）。容器收到 `loop -- --pr`，而 commander 把 `--` 當成「選項結束」
+標記，`--pr` 於是掉進位置參數，報「找不到目標 repo：…/--pr」。
+
+正解是**不要寫 `--`**：`docker compose run --rm loop --pr` 直接可用。entrypoint 另外
+把開頭的 `--` 吃掉，讓舊寫法也不會爆。
 
 ### 首次啟用要重做 baseline，而這需要一個新的容器模式
 

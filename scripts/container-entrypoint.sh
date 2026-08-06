@@ -16,6 +16,10 @@ if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
   MODE="$1"
   shift
 fi
+# compose 把服務名之後的東西原封不動往容器傳，包括 `--` 本身；而 commander 把 `--`
+# 當成「選項結束」標記，於是 `run --rm loop -- --pr` 會讓 --pr 掉進位置參數，
+# 報「找不到目標 repo：…/--pr」。這裡把開頭的 `--` 吃掉，兩種寫法都能用。
+if [ "${1:-}" = "--" ]; then shift; fi
 
 # URL 在這裡擋而不在 compose 的 ${VAR:?} 擋：compose 是載入時檢查，擋了會連
 # `docker compose up -d web`（根本用不到 URL）都跑不起來

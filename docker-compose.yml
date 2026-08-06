@@ -7,7 +7,7 @@
 #
 # compose 不排程。排程是外部的：host 排程器或 CI cron 呼叫
 #   docker compose run --rm loop bootstrap  # 只做一次：產生第一份 baseline 並開 PR
-#   docker compose run --rm loop -- --pr    # 跑一圈（容器裡請一律用 --pr，見下）
+#   docker compose run --rm loop --pr       # 跑一圈（容器裡請一律用 --pr，見下）
 #   docker compose run --rm publish         # merge 後重建站台並原子換版
 #   docker compose up -d web                # 站台常駐
 #

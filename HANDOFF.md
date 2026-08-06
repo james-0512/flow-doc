@@ -57,8 +57,8 @@ node <flow-doc>/dist/cli.js loop --pr          # PR 模式（要 push 權限與 
 
 # 容器（.env 填好 *_REPO_URL 之後；Windows 也能跑 loop 了）
 docker compose run --rm loop bootstrap                         # 只做一次：建 baseline
-docker compose run --rm loop -- --dry-run                      # 預演一圈
-docker compose run --rm loop -- --pr                           # 真跑（容器裡一律用 --pr）
+docker compose run --rm loop --dry-run                         # 預演一圈
+docker compose run --rm loop --pr                              # 真跑（容器裡一律用 --pr）
 docker compose run --rm publish && docker compose up -d web    # http://localhost:8080
 ```
 
