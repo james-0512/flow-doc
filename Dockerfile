@@ -11,7 +11,9 @@ FROM node:22-slim AS build
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.6 --activate
 COPY package.json pnpm-lock.yaml tsconfig.json ./
-RUN pnpm install --frozen-lockfile
+# --no-optional 跳過 claude-agent-sdk 的平台 binary（267 MB 的 Claude Code 執行檔）。
+# 型別檔在主套件裡，tsc 照樣過；容器走 API key，那條訂閱路徑本來就用不到（D16）
+RUN pnpm install --frozen-lockfile --no-optional
 COPY src ./src
 RUN pnpm build
 
@@ -32,7 +34,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile --prod --no-optional
 COPY --from=build /app/dist ./dist
 COPY templates ./templates
 # narrate 的規則檔 fallback：手冊 repo 沒帶 skill 時用工具自帶的這份（D13：規則只有一份）

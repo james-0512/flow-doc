@@ -12,7 +12,7 @@ CI／容器 wiring **做完並在本機驗證過**（設計見 [LOOP.md](LOOP.md
 | `Dockerfile`＋compose（loop／publish／web） | 可用；但 publish→nginx 那次全路徑驗證（950 頁、原子換版、中文路徑 200）是**掛載模式**跑的，該模式已移除（D15），clone 模式下**還沒重跑** |
 | repo 由容器 clone（D15，唯一模式） | entrypoint 的 git／install 邏輯本機實測過；**未對真實遠端 repo 跑過完整一圈** |
 | GH Actions workflows（flow-manuals repo） | **已寫好、未在 GitHub 上跑過**（需要 runner 與 secrets） |
-| narrate 線上實測 | **仍未做**——這台機器依舊沒有任何 Anthropic 憑證 |
+| narrate 線上實測 | 生成路徑**已通**——沒有 API key 時自動走 Claude Code 訂閱（D16），本機實測回得了內容；但**還沒真的寫過一章手冊** |
 
 flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）。
 **兩邊都沒推——推送要先問過使用者。**
@@ -21,6 +21,9 @@ flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）�
 
 1. **Anthropic 憑證**。設好後先照舊測 narrate（不要直接寫真實 manuals，先 `--dry-run`）；
    loop 那條路即使沒憑證也會收尾，欠的章節在 `pending.json`，補上憑證後下一輪自動補寫。
+   **本機**沒 API key 也能跑——會自動退回這台機器的 Claude Code 訂閱（D16）。
+   **容器**請照舊填 `ANTHROPIC_API_KEY`：裡面沒有 Claude Code 的登入憑證，
+   image 也刻意不裝那個 267 MB 的平台 binary。
 2. **一台跑得動 Docker 的機器**（Windows 也行了——D15 之後 node_modules 在容器內裝，
    不再有 junction 斷鏈問題）＋ `.env` 填 `TARGET_REPO_URL`、`MANUALS_REPO_URL`、`GH_TOKEN`。
    走 GH Actions 的話仍需 self-hosted runner（label：`self-hosted, linux, flow-doc`）與

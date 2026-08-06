@@ -496,6 +496,72 @@ compose `config` 渲染通過。
 **未做**：對真實遠端 repo 跑完整一圈（含 narrate 與開 PR）、以及 publish→nginx
 在 clone 模式下重跑——都需要憑證與 repo 存取權。
 
+## D16 — 沒有 API key 時退回 Claude Code 訂閱方案
+
+narrate 是整條管線唯一花錢的一步，而本機開發時常常是「沒有 API key，但這台機器
+已經登入 Claude Code」。`Complete` 本來就是為了離線測試抽出來的函式型別，所以加
+第二個實作、依環境自動選，呼叫端一行都不用改。
+
+用 `@anthropic-ai/claude-agent-sdk` 的 `query()`：它是 Claude Code 打包成 library，
+吃同一組登入憑證，額度算在訂閱方案裡。
+
+### 把 agent harness 當單次生成器，四個設定缺一不可
+
+`query()` 本來是跑 agent 迴圈的（會讀檔、跑指令、開 subagent），這裡只要
+「system ＋ user → 一段文字」：
+
+- `allowedTools: []` ＋ `permissionMode: 'dontAsk'` — 一個工具都不給，要用直接拒絕。
+  不設 `dontAsk` 的話它會停在那裡等人按同意，批次跑等於卡死。
+- `maxTurns: 1` — 不讓它自己多跑幾輪。
+- `settingSources: []` — **最容易漏的一個**。型別註解寫得很清楚：「省略時載入全部
+  來源（比照 CLI 預設）」。而 narrate 的 cwd 正好是手冊 repo，那裡有 flow-manual
+  skill 與 CLAUDE.md——載進來等於兩條路的 system prompt 不一樣，不會報錯，只會
+  安靜地寫出不同風格的章節。
+
+### 條款：這條路只給本機自己跑
+
+Agent SDK 文件明寫：除非事先核准，Anthropic 不允許第三方開發者在其產品中提供
+claude.ai 登入或額度，包含用 Agent SDK 建的 agent。自己在自己機器上用自己的登入
+跑內部工具是單人使用，不在射程內；**但不要接進共用 CI，也不要交給同事用同一組
+訂閱跑**。容器那條路因此刻意維持 API key（`.env.example` 標了）。
+
+### 打包：267 MB 的平台 binary 不進 image
+
+`claude-agent-sdk` 的平台 binary（完整的 Claude Code 執行檔）實測 267 MB，而主套件
+本身只有 4.1 MB。容器走 API key，永遠用不到它，所以 Dockerfile 兩個 stage 都加
+`--no-optional`——型別檔在主套件裡，tsc 照樣過。
+
+### 失去的東西，逐項記下
+
+| | API 路徑 | 訂閱路徑 |
+|---|---|---|
+| `effort` | ✅ | ✅（Options 有這個欄位） |
+| `stop_reason` | ✅ | ✅（兩種 result 都帶，`max_tokens`／`refusal` 判斷不變） |
+| `max_tokens` | ✅ | ❌ **Options 沒有輸出上限欄位**，`--max-tokens` 只影響 API 路徑 |
+| `count_tokens` | ✅ | ❌ 是 API 端點，dry-run 退回字元數粗估並標記 |
+| 伺服器端 `fallbacks` | ✅ | ❌ 分類器誤擋時沒有自動退避 |
+| 每次呼叫的固定開銷 | 無 | 約 27K token 的 harness 底層 prompt |
+
+`countInputTokens` 因此改回傳 `{ tokens, estimated }`——一個沒標記的估計值會被當成
+真實 token 數拿去算錢。
+
+### provider 判定只看環境變數
+
+`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 有值就走 API，否則退回訂閱。刻意
+**不去猜** `ant auth login` 的 profile——那是 SDK 內部解析的，這裡看不到，而且那條路
+已經是 API 計費，退回訂閱反而是降級。用 profile 的人設 `FLOW_DOC_LLM_PROVIDER=api`
+強制指定；拼錯的值直接報錯，不靜靜當成沒設。
+
+### 驗證
+
+實測跑通（本機無 API key，走訂閱）：provider 正確判為 `subscription`、文字正確、
+`stop_reason: end_turn`、usage 有值、單次約 7.2 秒。第二次相同呼叫的 27,323 token
+harness 開銷從 `cacheWrite` 轉成 `cacheRead`——**這決定了它在 950 章的量級下可行**，
+否則每章都付一次全價開銷。`resolveProvider` 六種組合進單元測試（160 個測試全過）。
+
+**未做**：用訂閱路徑真的寫過一章手冊（要有待補章節與封包才測得了），以及
+`--no-optional` 之後的 image 重建。
+
 ---
 
 ## 尚未定案
