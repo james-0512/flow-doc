@@ -525,11 +525,33 @@ claude.ai 登入或額度，包含用 Agent SDK 建的 agent。自己在自己�
 跑內部工具是單人使用，不在射程內；**但不要接進共用 CI，也不要交給同事用同一組
 訂閱跑**。容器那條路因此刻意維持 API key（`.env.example` 標了）。
 
-### 打包：267 MB 的平台 binary 不進 image
+### 打包：267 MB 的平台 binary 預設不進 image
 
 `claude-agent-sdk` 的平台 binary（完整的 Claude Code 執行檔）實測 267 MB，而主套件
-本身只有 4.1 MB。容器走 API key，永遠用不到它，所以 Dockerfile 兩個 stage 都加
-`--no-optional`——型別檔在主套件裡，tsc 照樣過。
+本身只有 4.1 MB。走 API key 的 image 永遠用不到它，所以 build stage 固定
+`--no-optional`（型別檔在主套件裡，tsc 照樣過），runtime stage 由建置參數決定。
+
+### 本機容器也能走訂閱：用 token，不掛憑證目錄
+
+一開始的結論是「容器只能用 API key」，理由之一是要掛 host 的 `~/.claude` 進去——
+那會把 D15 剛拆掉的 host 耦合裝回來，還讓長效憑證留在 volume 裡。
+
+後來查到 `claude setup-token`（長效驗證 token，需要訂閱），而 `CLAUDE_CODE_OAUTH_TOKEN`
+同時出現在 `sdk.mjs` 與打包的執行檔裡——**一個環境變數就夠，不用掛任何目錄**。
+host 不耦合的性質因此保住，設定方式也跟 `ANTHROPIC_API_KEY` 完全一致。
+
+於是改成建置參數：
+
+```
+WITH_SUBSCRIPTION=1 ＋ CLAUDE_CODE_OAUTH_TOKEN=… ＋ 重建 image
+```
+
+預設仍是 `0`——生產走 API key，不該扛 267 MB。**適用範圍沒有變**：自己的機器、
+自己的登入、只有自己用。共用 CI、self-hosted runner、同事共用一組訂閱都不行。
+
+實務上的取捨也要講清楚：訂閱那條路的額度綁在**你的帳號**上，nightly 要跑就得那台
+機器醒著；真正無人值守的閉環仍然需要常開的 runner ＋ API key。合理的分工是開發期
+用訂閱驗證流程不花錢，穩定後上 runner 用 API key。
 
 ### 失去的東西，逐項記下
 
@@ -559,8 +581,19 @@ claude.ai 登入或額度，包含用 Agent SDK 建的 agent。自己在自己�
 harness 開銷從 `cacheWrite` 轉成 `cacheRead`——**這決定了它在 950 章的量級下可行**，
 否則每章都付一次全價開銷。`resolveProvider` 六種組合進單元測試（160 個測試全過）。
 
-**未做**：用訂閱路徑真的寫過一章手冊（要有待補章節與封包才測得了），以及
-`--no-optional` 之後的 image 重建。
+兩種 image 都實際建過並驗證：
+
+| | 大小 | binary | SDK 載入 |
+|---|---:|---|---|
+| 預設（API key） | 425 MB | 不在 | — |
+| `WITH_SUBSCRIPTION=1` | 702 MB | linux-x64 | `query` 可載入 |
+
+建置時踩到兩個浪費，都在同一層修掉：pnpm 會把 glibc 與 musl 兩種變體都裝進來
+（各 278 MB，而 Debian base 只會用 glibc），以及 pnpm store 留在 image 裡。
+第一次建出來是 1.02 GB，修完 702 MB。
+
+**未做**：用訂閱路徑真的寫過一章手冊（要有待補章節與封包才測得了），以及在容器內
+用真 token 跑一次 narrate（驗證的是 image 裡 SDK 載得起來，不是端到端生成）。
 
 ---
 

@@ -21,6 +21,11 @@
 #                       設成空字串代表不做，例如目標不是 pnpm 專案）
 #   FLOW_DOC_TARGET_NAME 手冊 repo 內的目標目錄名（預設 mPHR_Frontend）
 #   ANTHROPIC_API_KEY   narrate 用（缺了照樣跑，章節進待補佇列）
+#   WITH_SUBSCRIPTION ＋ CLAUDE_CODE_OAUTH_TOKEN
+#                       改用 Claude Code 訂閱額度跑 narrate，而不是按 token 計費。
+#                       設 WITH_SUBSCRIPTION=1 重建 image（會多 267 MB），token 用
+#                       `claude setup-token` 產生。**只適合自己的機器、自己的登入、
+#                       只有自己用**——共用 CI 或給同事跑不行（D16）
 #   GH_TOKEN            私有 repo 的 clone、以及 PR 模式的 push／開 PR
 #   GIT_USER_NAME / GIT_USER_EMAIL  loop commit 的身份
 #   SITE_PORT           web 對外埠（預設 8080）
@@ -41,7 +46,12 @@ services:
   # workspace volume 常駐，跨輪保留 clone、node_modules 與 pnpm store：
   # 第一次跑要完整 clone＋install（慢），之後只 fetch＋快轉，lockfile 沒變就跳過安裝。
   loop:
-    build: .
+    build:
+      context: .
+      # 1 = 把 Claude Code 的平台 binary 裝進 image，改用訂閱額度跑 narrate。
+      # 只適合「自己的機器、自己的登入、只有自己用」——共用 CI 不行（D16）
+      args:
+        WITH_SUBSCRIPTION: ${WITH_SUBSCRIPTION:-0}
     image: flow-doc:latest
     profiles: [batch]
     restart: "no"
@@ -60,6 +70,9 @@ services:
       npm_config_store_dir: /workspace/.pnpm-store
       FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # 訂閱模式用。兩個都填的話 API key 優先（Claude Code 的既定行為，也是
+      # flow-doc resolveProvider 的判定順序）
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       GH_TOKEN: ${GH_TOKEN:-}
       GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
       GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}

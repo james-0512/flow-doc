@@ -21,9 +21,11 @@ flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）�
 
 1. **Anthropic 憑證**。設好後先照舊測 narrate（不要直接寫真實 manuals，先 `--dry-run`）；
    loop 那條路即使沒憑證也會收尾，欠的章節在 `pending.json`，補上憑證後下一輪自動補寫。
-   **本機**沒 API key 也能跑——會自動退回這台機器的 Claude Code 訂閱（D16）。
-   **容器**請照舊填 `ANTHROPIC_API_KEY`：裡面沒有 Claude Code 的登入憑證，
-   image 也刻意不裝那個 267 MB 的平台 binary。
+   **本機原生**沒 API key 也能跑——自動退回這台機器的 Claude Code 訂閱（D16）。
+   **容器**預設要 `ANTHROPIC_API_KEY`（image 不裝那個 267 MB 的 binary，425 MB）。
+   本機容器也想走訂閱的話：`claude setup-token` ＋ `.env` 設
+   `WITH_SUBSCRIPTION=1` 與 `CLAUDE_CODE_OAUTH_TOKEN`，重建 image（702 MB）。
+   ⚠ 訂閱那條路只限自己的機器、自己的登入、自己用——共用 CI 或給同事跑不行。
 2. **一台跑得動 Docker 的機器**（Windows 也行了——D15 之後 node_modules 在容器內裝，
    不再有 junction 斷鏈問題）＋ `.env` 填 `TARGET_REPO_URL`、`MANUALS_REPO_URL`、`GH_TOKEN`。
    走 GH Actions 的話仍需 self-hosted runner（label：`self-hosted, linux, flow-doc`）與
