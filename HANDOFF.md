@@ -104,11 +104,49 @@ docker compose up -d --no-deps web              # 只重啟站台，不觸發整
 
 exit code：0 完成或早退 · 1 錯誤 · 2 需人工（升版圈／熔斷）· 3 這輪沒跑（鎖／dirty／缺 generated 檔）。
 
+## TODO：兩個 scheduler 服務（已定案，未實作）
+
+`up -d` 解決的是**啟用**，不是**日常觸發**。日常那兩件事現在還沒有人做：
+
+| 要觸發什麼 | 何時 | 現況 |
+|---|---|---|
+| `loop` 跑一圈 | 每晚 | 無 |
+| `publish` 重建站台 | 手冊 repo main 前進之後 | 無 |
+
+第二項的缺口在 2026-08-07 實地出現過：07:23 publish 跑完；07:50 一輪 loop 推出 PR #6
+「機械改寫 2 章」；**07:51 它自動合併**（純 moved 輪次，`autoMergeEligible`），main 前進；
+publish 不知道，站台就這樣悄悄過期。**人完全沒介入也會發生**——所以不能靠「合併時順手跑」。
+
+**定案做法：兩個服務，都用 `restart: always`。** 節奏與 volume 都不同，分開才不會互相拖累。
+
+- `scheduler-loop`：每晚 `LOOP_AT`（預設 03:00）跑 `flow-doc-entrypoint loop --pr`。
+  掛 `workspace` volume。**要包 `timeout`**——一輪卡住就再也不會有下一輪。
+- `scheduler-publish`：每 `PUBLISH_POLL_SECONDS`（預設 300）比對一次
+  `git ls-remote <manuals> refs/heads/main` 與**上次成功發布的 SHA**，不同才跑 publish。
+  掛 `publish-workspace` ＋ `site-dist`。
+
+實作放 `scripts/scheduler.sh` 烤進映像（不要塞進 compose 的 command 字串，會難維護）。
+
+三個已驗證的前提與一個坑：
+
+- `git ls-remote` 在容器裡 **0.94s、不需要 clone**，poll 幾乎零成本。
+- 覆蓋自動合併與人審合併**同一個機制**——不管 main 怎麼前進，poll 都看得到。
+- 走 pull 不走 webhook：不必開對外埠、不必保管「誰拿到誰就能觸發部署」的 URL，
+  而且與 LOOP.md〈觸發機制：排程喚醒＋baseline 比對〉同構。Portainer stack webhook
+  是可行的替代（實測重複 `up -d` 不會重建 web、站台零中斷），但要 GitHub 連得進來。
+- **⚠ 比對對象必須是「上次成功發布的 SHA」，不能用工作區 HEAD。** entrypoint 是先
+  fetch＋快轉、才 vitepress build；build 失敗時 clone 已經前進，用 HEAD 比對會誤判成
+  「已發布」，站台永遠停在舊版直到下次有人合併。stamp 只在 publish 成功後才寫。
+
+另一個可選項（沒做，要先問過使用者）：`BOOTSTRAP_PUSH_TO_MAIN=1` 讓 bootstrap 直接推
+main 而不開 PR。那樣全新機器就真的零人工，但拿掉的是一個上千封包 commit 的審查閘。
+
 ## 已知待處理（不阻塞）
 
 - 9 份 Form 域手冊 verify 不過（既有內容問題）；loop 只在動到它們時才會標進佇列。
 - `tmep` commit 訊息錯字，使用者明確表示不動。
 - LOOP.md 尚未定案兩項：redirect 路由、334 個 ROUTE entry 未被使用。
+- **站台目前落後 main**（差 PR #6 那兩章）——跑一次 `docker compose run --rm publish` 即可。
 
 ## 下個 session 可能用得到的 skill
 
