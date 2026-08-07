@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { slugify } from './paths.js'
+import { DIAGRAM_ZOOM_CSS, DIAGRAM_ZOOM_JS, THEME_INDEX } from './site-theme.js'
 import type { AsyncLink, ChainNode, FlowChain, SideEffect, TraceResult } from './types.js'
 
 export interface SiteOptions {
@@ -382,6 +383,12 @@ export function buildSite(
     file: '.vitepress/config.mts',
     content: renderConfig(result, domains, manuals, manualPrimaries, opts, Boolean(siteOverview))
   })
+
+  // 自訂主題：只為了讓序列圖能放大看。複雜模組的圖寬到超出內文欄寬，
+  // mermaid 等比縮進來之後字就看不清了（見 src/site-theme.ts）
+  pages.push({ file: '.vitepress/theme/index.ts', content: THEME_INDEX })
+  pages.push({ file: '.vitepress/theme/diagram-zoom.ts', content: DIAGRAM_ZOOM_JS })
+  pages.push({ file: '.vitepress/theme/diagram-zoom.css', content: DIAGRAM_ZOOM_CSS })
 
   // 站台自帶 package.json，與分析器的依賴完全分離。
   // 兩者放在一起會出事：vitepress 綁 vite 5、vitest 需要 vite 6+，裝在同一個

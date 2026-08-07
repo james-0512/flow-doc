@@ -495,6 +495,7 @@ program
 
       if (opts.dryRun) {
         let inputTotal = 0
+        let estimated = false
         for (const entryId of targets) {
           if (!byId.has(entryId)) continue
           const slug = slugify(entryId)
@@ -504,11 +505,16 @@ program
             continue
           }
           const packet = fs.readFileSync(packetFile, 'utf8')
-          const tokens = await countInputTokens(system, buildUserPrompt(packet), opts.model)
-          inputTotal += tokens
-          console.log(`  ${slug}\n      封包 ${packet.length.toLocaleString()} 字元 · 輸入約 ${tokens.toLocaleString()} tokens`)
+          const counted = await countInputTokens(system, buildUserPrompt(packet), opts.model)
+          inputTotal += counted.tokens
+          estimated ||= counted.estimated
+          console.log(
+            `  ${slug}\n      封包 ${packet.length.toLocaleString()} 字元 · 輸入約 ${counted.tokens.toLocaleString()} tokens`
+          )
         }
         console.log(`\n（預演）輸入合計約 ${inputTotal.toLocaleString()} tokens`)
+        // 沒有 API 憑證時 count_tokens 用不了，數字是字元數換算的——不標出來會被當成真值
+        if (estimated) console.log('⚠ 訂閱方案沒有 count_tokens 端點，以上是依字元數粗估，僅供看數量級')
         return
       }
 

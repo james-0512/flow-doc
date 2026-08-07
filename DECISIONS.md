@@ -383,6 +383,218 @@ workflow 已內建這步。
 降級進佇列且輪次照樣收尾；佇列重試輪不動 baseline 只補欠帳；PR 模式分支推送與現場還原
 驗證通過；publish 容器 build 950 頁站台原子換版，nginx 服務中文路徑全綠。
 
+## D15 — repo 一律由容器 clone，掛載模式移除
+
+原本兩個 repo 都只能是 host 絕對路徑（`TARGET_REPO_PATH`／`FLOW_MANUALS_PATH`）。
+這對 self-hosted runner 合理，對其他情境有兩個硬傷：host 得先備好目標 repo
+（含 node_modules 與 generated 檔），而且 Windows host 根本備不出能用的（D14）。
+改成 **compose 只收 git URL，容器自己 clone／fetch 到常駐 volume**。
+
+### 為什麼是取代而不是並存
+
+先做成兩種模式並存，然後拆掉了。原因三個：
+
+1. **並存在 compose 裡很貴。** 實測 `${VAR:?}` 是**載入時**檢查，不是用到才檢查——
+   單檔雙服務時，只跑 `docker compose config --services` 想看 web，也會因為另一個
+   模式的變數沒填而整個爆掉。要嘛四個變數全填，要嘛放棄 `:?` 的明確錯誤訊息，
+   要嘛拆成兩個檔＋`COMPOSE_FILE` 切換。三條路都是為了一個不常用的模式付帳。
+2. **掛載模式剩下的用途本來就有更好的做法。** 它唯一還活著的場景是本機預覽站台，
+   而那件事用原生 `flow-doc site -m manuals` ＋ vitepress dev 更快也更直接。
+3. **少一條路徑就少一種「baseline 產自哪個環境」的組合。** 這個閉環最貴的失敗是
+   環境不一致造成的滿江紅（D14），模式愈少愈不容易踩。
+
+**代價要記清楚，有三項**：目標 repo 不再是 `:ro`（下面說明）；publish 只反映**已推上
+origin** 的手冊，未推的本地修改不會出現在站台；以及 D14 那輪 e2e 驗證過的
+publish→nginx 路徑是掛載模式跑的，換成 clone 之後還沒重跑過。
+
+### `:ro` 換成拋棄式副本
+
+掛載模式下目標 repo 掛 `:ro`，「分析器只讀不寫」是能被強制執行的性質，這是實打實
+的損失。換來的保證不同但成立：volume 裡的 clone **本來就是拋棄式副本**，不是任何人
+的工作目錄，寫壞了刪掉重來即可——而 install 與 codegen 本來就必須寫進去，`:ro` 對
+它們從一開始就不適用。使用者真正的 repo 全程沒有被容器碰過。
+
+### 順手解掉 D14 的 Windows 坑
+
+junction 斷鏈的根因是「node_modules 在 host 裝、拿到容器裡用」。現在 clone 與
+`pnpm install` 都在容器內完成，node_modules 必然是 Linux 佈局、與分析環境同源——
+**host 是什麼平台都不影響**。Windows 開發機因此也能跑閉環容器，不必只靠原生 node。
+
+### URL 的必填改在 entrypoint 擋
+
+承上面那個 `${VAR:?}` 的發現：URL 若寫成 compose 的必填，`docker compose up -d web`
+這種根本用不到 URL 的指令也會被擋。所以 compose 一律 `${VAR:-}`，必填在 entrypoint
+用 `: "${VAR:?...}"` 檢查——真正要用的時候才報錯，訊息也更具體。
+
+### 四個細節，每個都對應一個會安靜出錯的地方
+
+- **不淺 clone。** `detectRenames` 要 `baseline..HEAD` 的歷史，取不到就回空表，
+  改名退化成 removed＋added。不會報錯，只會多花 LLM 的錢——最貴的那種靜默失敗。
+- **快轉用 `--ff-only` 而非 `reset --hard`。** 非 PR 模式的 loop 在手冊 repo 留下
+  本地 commit 且不推，本地領先遠端時 ff-only 是 no-op；`reset --hard` 會把那些
+  commit 連同 baseline 一起洗掉，下一輪整本手冊被判成 added。真分岔就 exit 1 喊人。
+- **install 的 stamp 放在 repo 外**（`$(dirname "$dir")`）。放進工作樹會多一個
+  untracked 檔，`git status --porcelain` 看得到，loop 判定目標 dirty 直接拒跑。
+- **loop 與 publish 各用一顆 volume。** publish 要的是 merge 後的 origin 狀態，而
+  loop 的工作區可能停在 PR 分支或有未推的 commit。共用會讓兩個批次搶同一棵樹，
+  手冊 repo 很小，多一份 clone 便宜得多。
+
+安裝只在 lockfile 雜湊變動或 node_modules 不在時才跑（stamp 記雜湊），codegen 每輪
+都跑（冪等、相對便宜，且它缺了 loop 會 exit 3）。pnpm store 放同一顆 volume：
+跨輪留著，而且要與 node_modules 同檔案系統才走得了硬連結。
+
+### 順帶修掉的：旗標傳不進去（兩層）
+
+entrypoint 原本無條件把 `$1` 當模式名，於是 `docker compose run --rm loop -- --pr`
+會報「未知模式：--pr」——文件裡寫著的指令其實跑不起來。改成只有不以 `-` 開頭的
+第一個參數才算模式，其餘全部轉交底下的 CLI。
+
+改完還是不通，第二層才是真兇：**compose 把服務名之後的東西原封不動往容器傳，
+包括 `--` 本身**（實測 `--entrypoint echo` 確認；`--dry-run` 這種與 compose 同名的
+旗標也一樣不被攔截）。容器收到 `loop -- --pr`，而 commander 把 `--` 當成「選項結束」
+標記，`--pr` 於是掉進位置參數，報「找不到目標 repo：…/--pr」。
+
+正解是**不要寫 `--`**：`docker compose run --rm loop --pr` 直接可用。entrypoint 另外
+把開頭的 `--` 吃掉，讓舊寫法也不會爆。
+
+### 首次啟用要重做 baseline，而這需要一個新的容器模式
+
+`flow-chains.json` 記著 platform 與該環境的模組解析結果。從「host 原生跑」切到
+「容器內 clone＋install」等於換了分析環境，第一輪會大量 changed 被熔斷器擋下——
+不會寫壞東西，但那輪白跑。
+
+問題是**這件事原本做不到**：loop 刻意不自我初始化（沒 baseline 就 exit 2，理由見
+D11「閉環只維護既有敘述」），而 entrypoint 只有 loop／publish 兩個模式。掛載模式
+時代這不是問題——baseline 在 runner 上原生跑，那台機器就是分析環境；改成容器內
+clone 之後，分析環境只存在於容器裡，外面產不出可用的 baseline。
+
+所以加第三個模式 `bootstrap`：prepare（與 loop 同一套）→ trace ＋ pack → 開
+`bootstrap/<目標>/<時戳>` 分支 → commit → push ＋ 開 PR。走 PR 而不是直推 main，
+是因為這份 commit 動輒上千個封包，跟 loop 的 PR 模式共用同一條路徑比較不會出意外。
+已有 baseline 時預設拒跑（要 `--force`）——重建等於宣告換環境，必須是明確的決定。
+
+### 容器裡的 loop 一定要帶 `--pr`
+
+`loop` 不帶 `--pr` 只在本地 commit、不 push。在容器裡「本地」是 volume：commit
+沒人看得到，下一輪 `--ff-only` 也不會動它（本地領先），只會愈積愈多。這不是新行為，
+但掛載模式時代本地 commit 落在 host 的真實 repo 裡，是有意義的；容器內 clone 之後
+就沒意義了。compose 註解與 HANDOFF 都標了這條，預設 CMD 仍是不帶旗標的 `loop`
+（讓「跑一圈就推 PR」變成預設值，應該由使用者明確決定，不是這輪順手改掉）。
+
+### 驗證
+
+git 邏輯以本地 bare repo 實測四條路徑：首次 clone、origin 前進後快轉、本地領先時
+為 no-op（commit 未被洗掉）、真分岔時 exit 1。install 跳過邏輯實測四輪，install 執行
+2 次、codegen 4 次，stamp 落在 repo 外且工作樹未變髒。模式參數解析五種輸入全對。
+compose `config` 渲染通過。
+
+串起來的流程也實測過（用本地 bare repo 當假 origin，entrypoint 只改 dist 路徑）：
+`bootstrap` 從零產出 baseline＋封包並落在正確的分支上、已有 baseline 時正確拒跑；
+模擬 PR 合併後跑 `loop`，工作區自動從 bootstrap 分支回到 main 並快轉，然後正確
+早退（HEAD ＝ baseline）、exit 0。
+
+**未做**：對真實遠端 repo 跑完整一圈（含 narrate 與開 PR）、以及 publish→nginx
+在 clone 模式下重跑——都需要憑證與 repo 存取權。
+
+## D16 — 沒有 API key 時退回 Claude Code 訂閱方案
+
+narrate 是整條管線唯一花錢的一步，而本機開發時常常是「沒有 API key，但這台機器
+已經登入 Claude Code」。`Complete` 本來就是為了離線測試抽出來的函式型別，所以加
+第二個實作、依環境自動選，呼叫端一行都不用改。
+
+用 `@anthropic-ai/claude-agent-sdk` 的 `query()`：它是 Claude Code 打包成 library，
+吃同一組登入憑證，額度算在訂閱方案裡。
+
+### 把 agent harness 當單次生成器，四個設定缺一不可
+
+`query()` 本來是跑 agent 迴圈的（會讀檔、跑指令、開 subagent），這裡只要
+「system ＋ user → 一段文字」：
+
+- `allowedTools: []` ＋ `permissionMode: 'dontAsk'` — 一個工具都不給，要用直接拒絕。
+  不設 `dontAsk` 的話它會停在那裡等人按同意，批次跑等於卡死。
+- `maxTurns: 1` — 不讓它自己多跑幾輪。
+- `settingSources: []` — **最容易漏的一個**。型別註解寫得很清楚：「省略時載入全部
+  來源（比照 CLI 預設）」。而 narrate 的 cwd 正好是手冊 repo，那裡有 flow-manual
+  skill 與 CLAUDE.md——載進來等於兩條路的 system prompt 不一樣，不會報錯，只會
+  安靜地寫出不同風格的章節。
+
+### 條款：這條路只給本機自己跑
+
+Agent SDK 文件明寫：除非事先核准，Anthropic 不允許第三方開發者在其產品中提供
+claude.ai 登入或額度，包含用 Agent SDK 建的 agent。自己在自己機器上用自己的登入
+跑內部工具是單人使用，不在射程內；**但不要接進共用 CI，也不要交給同事用同一組
+訂閱跑**。容器那條路因此刻意維持 API key（`.env.example` 標了）。
+
+### 打包：267 MB 的平台 binary 預設不進 image
+
+`claude-agent-sdk` 的平台 binary（完整的 Claude Code 執行檔）實測 267 MB，而主套件
+本身只有 4.1 MB。走 API key 的 image 永遠用不到它，所以 build stage 固定
+`--no-optional`（型別檔在主套件裡，tsc 照樣過），runtime stage 由建置參數決定。
+
+### 本機容器也能走訂閱：用 token，不掛憑證目錄
+
+一開始的結論是「容器只能用 API key」，理由之一是要掛 host 的 `~/.claude` 進去——
+那會把 D15 剛拆掉的 host 耦合裝回來，還讓長效憑證留在 volume 裡。
+
+後來查到 `claude setup-token`（長效驗證 token，需要訂閱），而 `CLAUDE_CODE_OAUTH_TOKEN`
+同時出現在 `sdk.mjs` 與打包的執行檔裡——**一個環境變數就夠，不用掛任何目錄**。
+host 不耦合的性質因此保住，設定方式也跟 `ANTHROPIC_API_KEY` 完全一致。
+
+於是改成建置參數：
+
+```
+WITH_SUBSCRIPTION=1 ＋ CLAUDE_CODE_OAUTH_TOKEN=… ＋ 重建 image
+```
+
+預設仍是 `0`——生產走 API key，不該扛 267 MB。**適用範圍沒有變**：自己的機器、
+自己的登入、只有自己用。共用 CI、self-hosted runner、同事共用一組訂閱都不行。
+
+實務上的取捨也要講清楚：訂閱那條路的額度綁在**你的帳號**上，nightly 要跑就得那台
+機器醒著；真正無人值守的閉環仍然需要常開的 runner ＋ API key。合理的分工是開發期
+用訂閱驗證流程不花錢，穩定後上 runner 用 API key。
+
+### 失去的東西，逐項記下
+
+| | API 路徑 | 訂閱路徑 |
+|---|---|---|
+| `effort` | ✅ | ✅（Options 有這個欄位） |
+| `stop_reason` | ✅ | ✅（兩種 result 都帶，`max_tokens`／`refusal` 判斷不變） |
+| `max_tokens` | ✅ | ❌ **Options 沒有輸出上限欄位**，`--max-tokens` 只影響 API 路徑 |
+| `count_tokens` | ✅ | ❌ 是 API 端點，dry-run 退回字元數粗估並標記 |
+| 伺服器端 `fallbacks` | ✅ | ❌ 分類器誤擋時沒有自動退避 |
+| 每次呼叫的固定開銷 | 無 | 約 27K token 的 harness 底層 prompt |
+
+`countInputTokens` 因此改回傳 `{ tokens, estimated }`——一個沒標記的估計值會被當成
+真實 token 數拿去算錢。
+
+### provider 判定只看環境變數
+
+`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 有值就走 API，否則退回訂閱。刻意
+**不去猜** `ant auth login` 的 profile——那是 SDK 內部解析的，這裡看不到，而且那條路
+已經是 API 計費，退回訂閱反而是降級。用 profile 的人設 `FLOW_DOC_LLM_PROVIDER=api`
+強制指定；拼錯的值直接報錯，不靜靜當成沒設。
+
+### 驗證
+
+實測跑通（本機無 API key，走訂閱）：provider 正確判為 `subscription`、文字正確、
+`stop_reason: end_turn`、usage 有值、單次約 7.2 秒。第二次相同呼叫的 27,323 token
+harness 開銷從 `cacheWrite` 轉成 `cacheRead`——**這決定了它在 950 章的量級下可行**，
+否則每章都付一次全價開銷。`resolveProvider` 六種組合進單元測試（160 個測試全過）。
+
+兩種 image 都實際建過並驗證：
+
+| | 大小 | binary | SDK 載入 |
+|---|---:|---|---|
+| 預設（API key） | 425 MB | 不在 | — |
+| `WITH_SUBSCRIPTION=1` | 702 MB | linux-x64 | `query` 可載入 |
+
+建置時踩到兩個浪費，都在同一層修掉：pnpm 會把 glibc 與 musl 兩種變體都裝進來
+（各 278 MB，而 Debian base 只會用 glibc），以及 pnpm store 留在 image 裡。
+第一次建出來是 1.02 GB，修完 702 MB。
+
+**未做**：用訂閱路徑真的寫過一章手冊（要有待補章節與封包才測得了），以及在容器內
+用真 token 跑一次 narrate（驗證的是 image 裡 SDK 載得起來，不是端到端生成）。
+
 ---
 
 ## 尚未定案

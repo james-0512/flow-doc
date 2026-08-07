@@ -1,0 +1,15 @@
+# web 服務：把 nginx 設定烤進映像，不用 bind mount。
+#
+# 原本是 `./scripts/nginx.conf:/etc/nginx/conf.d/default.conf:ro`，在本機 compose
+# 沒問題，但走 GitOps 部署（Portainer stack 之類）會壞：那類工具把 repo clone 到
+# **自己容器內**的路徑（Portainer 是 /data/compose/<id>），而 bind 的來源路徑是
+# **host 上的 daemon** 解析的。除非那個 /data 剛好 bind 在 host 的同名路徑，
+# 否則 daemon 找不到來源——而 daemon 對找不到的 bind 來源是**建一個空目錄頂上去**，
+# 不是報錯。結果是 nginx 安靜地吃不到設定檔，`root /site/current` 與 try_files
+# 全部沒生效，使用者看到 nginx 預設歡迎頁。
+#
+# 烤進去之後 stack 與 host 檔案系統零耦合，改設定走 rebuild。
+# 順帶讓 `up -d` 真的有東西可 build——loop 在 profiles: [batch] 底下不會被啟動，
+# 它的 build 也就不會觸發，web 是這個 compose 唯一會被 GitOps 部署到的服務。
+FROM nginx:1.27-alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf

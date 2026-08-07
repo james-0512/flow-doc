@@ -1,75 +1,201 @@
-# 兩個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
-#   loop／publish  批次，跑完退出（restart: no），排程器用 `docker compose run --rm` 呼叫
-#   web            長駐 nginx，服務靜態站
+# repo 一律由容器自己 clone／fetch 到常駐 volume——host 上什麼都不用先準備。
+# （曾經有個 bind mount host 路徑的「掛載模式」，已移除，理由見 DECISIONS D15。）
 #
-# compose 不排程。排程是外部的：host 排程器或 CI cron 呼叫
-#   docker compose run --rm loop            # 跑一圈（PR 模式加 -- --pr）
-#   docker compose run --rm publish         # merge 後重建站台並原子換版
-#   docker compose up -d web                # 站台常駐
+# ── 啟用：一行指令 ─────────────────────────────────────────────────────
+#
+#   docker compose up -d
+#
+# 這一行會做完：build 映像 → bootstrap（產 baseline 並開 PR，已有就 2 秒跳過）
+# → publish（建站台、原子換版）→ web（開站）。全新機器上除了填 .env 之外不需要
+# 別的準備，GitOps 工具（Portainer stack 之類）部署這份檔案時走的也是這條路。
+#
+# **唯一還需要人的一步：合併 bootstrap 開的那個 PR。** 合併之後 loop 才有比對基準。
+# 這是刻意的——那份 commit 動輒上千個封包，值得看一眼。
+#
+# 四個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
+#   bootstrap／publish  批次，`up -d` 會帶著跑，跑完退出（restart: no）
+#   loop                批次，**在 profiles: [batch] 裡，`up -d` 不會碰它**——
+#                       它會開 PR、燒 LLM 額度，那是排程器的決定，不是部署的
+#   web                 長駐 nginx，服務靜態站
+#
+# compose 不排程。日常那一圈仍由外部觸發（host 排程器或 CI cron）：
+#   docker compose run --rm loop --pr       # 跑一圈（容器裡請一律用 --pr，見下）
+#   docker compose run --rm loop bootstrap  # 手動重建 baseline（已有的話要加 --force）
+#   docker compose run --rm publish         # 只重建站台，不動別的
+#   docker compose up -d --no-deps web      # 只重啟站台，不觸發整條鏈
+#
+# ⚠ 容器裡跑 loop 要帶 `--pr`。不帶的話 loop 只在本地 commit、不 push，而這裡的
+#   「本地」是容器的 volume——沒有人看得到，下次 fetch 也只會讓它愈積愈多。
 #
 # 需要的環境變數放 .env（不進版控）：
-#   TARGET_REPO_PATH    目標 repo 在 host 的絕對路徑（掛 :ro；直接掛整個 repo，
-#                       node_modules 與 generated 檔就跟分析 baseline 的環境一致）
-#   FLOW_MANUALS_PATH   flow-manuals 在 host 的絕對路徑（唯一需要寫入的掛載）
+#   TARGET_REPO_URL / TARGET_REPO_REF      目標 repo 的 git URL 與分支（ref 預設 main）
+#   MANUALS_REPO_URL / MANUALS_REPO_REF    flow-manuals 的 git URL 與分支（ref 預設 main）
+#   TARGET_INSTALL_CMD / TARGET_CODEGEN_CMD  目標的安裝與 codegen 指令（有預設值；
+#                       設成空字串代表不做，例如目標不是 pnpm 專案）
 #   FLOW_DOC_TARGET_NAME 手冊 repo 內的目標目錄名（預設 mPHR_Frontend）
 #   ANTHROPIC_API_KEY   narrate 用（缺了照樣跑，章節進待補佇列）
-#   GH_TOKEN            PR 模式的 push／開 PR 用
+#   WITH_SUBSCRIPTION ＋ CLAUDE_CODE_OAUTH_TOKEN
+#                       改用 Claude Code 訂閱額度跑 narrate，而不是按 token 計費。
+#                       設 WITH_SUBSCRIPTION=1 重建 image（會多 267 MB），token 用
+#                       `claude setup-token` 產生。**只適合自己的機器、自己的登入、
+#                       只有自己用**——共用 CI 或給同事跑不行（D16）
+#   GH_TOKEN            私有 repo 的 clone、以及 PR 模式的 push／開 PR
 #   GIT_USER_NAME / GIT_USER_EMAIL  loop commit 的身份
 #   SITE_PORT           web 對外埠（預設 8080）
 #
-# Linux host 註記：容器以 root 寫入掛載的 flow-manuals 會留下 root 擁有的檔案，
-# 需要的話給 loop/publish 加 user: "1000:1000"（Windows/macOS 的 Docker Desktop 不受影響）。
+# URL 沒填不會在這裡擋（擋了連 `up -d web` 都跑不起來，compose 的 ${VAR:?} 是
+# 載入時檢查、不管你叫的是哪個服務）——改由 entrypoint 在真正要用時報錯。
 #
-# ⚠ Windows host 限制（實測）：目標 repo 的 pnpm node_modules 是 junction 結構，
-# 掛進 Linux 容器後 junction 斷掉，pinia 這類「靠 node_modules 型別」的解析全部失效——
-# 941/1894 條鏈的樹形改變，diff 滿江紅、熔斷器擋下。所以：
-#   - 生產環境的 loop 容器要跑在 Linux host（self-hosted runner），
-#     目標 repo 的 checkout 與 pnpm install 都在該機原生完成，baseline 也由容器產生
-#   - Windows 開發機要跑閉環，直接用原生 node（工作排程器＋ node dist/cli.js loop），
-#     容器只拿來 smoke 測 web／publish
+# clone 是**完整歷史**，不淺層：diff 的改名偵測要 baseline..HEAD 的歷史，不夠時
+# 改名會退化成 removed＋added——不報錯，只是多花 LLM 的錢。
+#
+# ⚠ 目標 repo 的分析環境（node_modules）由容器內的 install 產生，與 host 平台無關。
+#   D14 那個「Windows 的 pnpm junction 掛進 Linux 容器會斷鏈」的坑因此不存在，
+#   Windows 機也能跑 loop 容器。但**首次啟用要重做 baseline**：flow-chains.json 記著
+#   platform 與該環境的模組解析結果，換環境的第一輪會大量 changed 被熔斷器擋下
+#   （不會寫壞東西，但那輪白跑）。先在容器內跑一次 trace＋pack 並 commit。
+
+# 三個服務共用同一份 build 設定與同一顆映像（loop／bootstrap／publish 是同一個
+# image 的三種模式）。用 anchor 而不是抄三遍：抄三遍遲早會有一份忘了改。
+#
+# ⚠ build 不能只掛在 loop 上。loop 在 profiles: [batch] 底下，`up -d` 不會啟動它，
+#   連帶它的 build 也不會觸發——那樣 bootstrap／publish 就會找不到 flow-doc:latest。
+x-flow-doc-build: &flow-doc-build
+  context: .
+  # 1 = 把 Claude Code 的平台 binary 裝進 image，改用訂閱額度跑 narrate。
+  # 只適合「自己的機器、自己的登入、只有自己用」——共用 CI 不行（D16）
+  args:
+    WITH_SUBSCRIPTION: ${WITH_SUBSCRIPTION:-0}
+
+# 分析環境的變數：loop 與 bootstrap 必須完全一致——bootstrap 產的 baseline 就是
+# loop 之後拿來比對的基準，兩者環境不同的話第一輪必定滿江紅（D14）
+x-analysis-env: &analysis-env
+  FLOW_DOC_TARGET: /workspace/target
+  FLOW_MANUALS_DIR: /workspace/manuals
+  TARGET_REPO_URL: ${TARGET_REPO_URL:-}
+  TARGET_REPO_REF: ${TARGET_REPO_REF:-main}
+  MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
+  MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
+  TARGET_INSTALL_CMD: ${TARGET_INSTALL_CMD-pnpm install --frozen-lockfile}
+  TARGET_CODEGEN_CMD: ${TARGET_CODEGEN_CMD-pnpm generate:components-dts}
+  # pnpm store 放同一顆 volume：跨輪留著，而且要與 node_modules 同一個檔案系統
+  # 才能走硬連結（不同 fs 會退化成整包複製）
+  npm_config_store_dir: /workspace/.pnpm-store
+  FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # 訂閱模式用。兩個都填的話 API key 優先（Claude Code 的既定行為，也是
+  # flow-doc resolveProvider 的判定順序）
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  GH_TOKEN: ${GH_TOKEN:-}
+  GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
+  GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
 
 services:
+  # 啟用閉環的第一步，`up -d` 會帶著跑。**冪等**：已經有 baseline 就 2 秒內跳過
+  # （BOOTSTRAP_AUTO=1 讓它 exit 0 而不是 exit 1，否則每次 up 都會噴一次錯誤）。
+  #
+  # 與 loop 共用 workspace volume——刻意的：baseline 必須在 loop 之後要用的那個
+  # 分析環境裡產生。
+  #
+  # ⚠ 它的產物是一個 **PR**，還是要人合併，`up` 只幫你跑到開 PR 為止。
+  bootstrap:
+    build: *flow-doc-build
+    image: flow-doc:latest
+    restart: "no"
+    init: true
+    command: ["bootstrap"]
+    environment:
+      <<: *analysis-env
+      # 自動模式：已有 baseline／沒填 TARGET_REPO_URL 時安靜跳過（exit 0），
+      # 不要擋住後面的 publish 與 web。手動跑時不設它，維持原本的大聲拒絕
+      BOOTSTRAP_AUTO: "1"
+    volumes:
+      - workspace:/workspace
+
+  # 日常增量圈。**唯一留在 profiles: [batch] 的服務**——`up -d` 絕對不能碰它：
+  # 它會開 PR、燒 LLM 額度，那是排程器（CI／cron）該決定的事，不是部署該做的事。
   loop:
-    build: .
+    build: *flow-doc-build
     image: flow-doc:latest
     profiles: [batch]
     restart: "no"
     init: true
-    environment:
-      FLOW_DOC_TARGET: /target
-      FLOW_MANUALS_DIR: /manuals
-      FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GH_TOKEN: ${GH_TOKEN:-}
-      GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
-      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
+    environment: *analysis-env
     volumes:
-      - ${TARGET_REPO_PATH:?目標 repo 絕對路徑}:/target:ro
-      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+      - workspace:/workspace
 
+  # 獨立 volume，不與 loop 共用：publish 要的是 merge 後的 origin 狀態，而 loop 的
+  # 工作區可能停在 PR 分支、或有還沒推的本地 commit。手冊 repo 很小，多一份 clone
+  # 比兩個批次搶同一棵樹便宜。
+  #
+  # 推論：站台只反映**已推上 origin 的**手冊。要預覽還沒推的本地修改，用原生
+  # `flow-doc site -m manuals` 加 vitepress dev，不要走這條。
+  #
+  # 不在 profile 裡：web 靠 depends_on 等它跑完，而 depends_on **不會**自動啟用
+  # profile（實測：批次服務會被整個跳過，沒有任何錯誤）。
   publish:
+    build: *flow-doc-build
     image: flow-doc:latest
-    profiles: [batch]
     restart: "no"
     init: true
     command: ["publish"]
     environment:
-      FLOW_MANUALS_DIR: /manuals
+      FLOW_MANUALS_DIR: /publish-workspace/manuals
+      MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
+      MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
       FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
       FLOW_DOC_SITE_TITLE: ${FLOW_DOC_SITE_TITLE:-}
       SITE_VOLUME: /site
+      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
-      - ${FLOW_MANUALS_PATH:?flow-manuals 絕對路徑}:/manuals
+      - publish-workspace:/publish-workspace
       - site-dist:/site
 
+  # 設定檔烤進映像而不是 bind mount——理由見 scripts/Dockerfile.web 開頭。
+  # 簡短版：GitOps 部署（Portainer stack 之類）的相對 bind 來源會被 host daemon
+  # 解析到不存在的路徑，而它對此是「建一個空目錄頂上去」，不是報錯。
   web:
-    image: nginx:1.27-alpine
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.web
+    image: flow-doc-web:latest
     restart: always
     ports:
       - "${SITE_PORT:-8080}:80"
     volumes:
       - site-dist:/site:ro
-      - ./scripts/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    # 等 publish 跑完再開站，全新機器才不會先端出一個空的 404。
+    #
+    # ⚠ `required: false` 不能拿掉。少了它，publish 失敗（網路斷、git 分岔、
+    #   vitepress build 壞掉）會**連帶讓站台起不來**——本來只是內容沒更新，變成
+    #   整個站掛掉。有它就只是警告一行，web 照樣端出 volume 裡的上一版。
+    #   原子換版的設計本來就是為了讓這兩件事解耦，別在這裡把它綁回去。
+    depends_on:
+      publish:
+        condition: service_completed_successfully
+        required: false
 
+# volume 名字**明確釘死**，不吃 compose project 前綴。
+#
+# project 名稱預設取目錄名，但 GitOps 工具（Portainer stack 之類）是取 stack 名稱。
+# 同一份 compose 由兩邊部署會各自建一顆 <project>_site-dist：publish（CLI／CI 跑）
+# 寫進一顆、web（stack 管）讀另一顆，站台永遠是空的**而且不會報錯**。
+#
+# 名字沿用既有的 flow-doc_*（看起來像前綴，但現在是明確指定）：換名字會讓
+# workspace 變成空的新 volume，目標 repo 的完整 clone 與 node_modules 都要重來。
 volumes:
+  # publish 寫、web 讀。曾經設成 external（compose 對跨 project 共用的官方做法），
+  # 但那要求新機器先手動 `docker volume create`——而現在 publish 與 web 同在一個
+  # compose 檔、同一個 project，`up -d` 一條龍就要能跑，多一個前置步驟不划算。
+  # 只釘 name 就已經保證兩者指向同一顆實體 volume；跨 project 時 compose 只是多印
+  # 一行「這顆是 project X 建的」警告，仍會正常掛上（實測）。
+  #
+  # 若你堅持從別的 project 驅動 publish（例如自己的 checkout 對上 Portainer stack），
+  # 加 `-p flow-doc` 讓兩邊 project 名一致，警告就不會出現。
   site-dist:
+    name: flow-doc_site-dist
+  # 這兩顆只有批次容器碰得到（永遠是同一個 project），不需要 external
+  workspace:
+    name: flow-doc_workspace
+  publish-workspace:
+    name: flow-doc_publish-workspace

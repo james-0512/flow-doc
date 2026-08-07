@@ -43,7 +43,7 @@ cd C:/project/flow-manuals/mPHR_Frontend && flow-doc trace && flow-doc pack
 `diff` 與 `reanchor` 是閉環的骨架（見 [LOOP.md](LOOP.md)）：多數 commit 只讓行號漂移，
 那些章節不需要 LLM 重寫，機械改寫即可。`loop` 把整圈串起來——沒憑證也能跑
 （該寫的章節進 `pending.json` 待補佇列），排程與容器見 LOOP.md〈容器化〉與
-`docker-compose.yml`。
+`docker-compose.yml`——兩個 repo 都由容器自己 clone，`.env` 只給 git URL。
 
 撰寫敘述用 `.claude/skills/flow-manual`：讀 `packets/*.md`，寫進 `manuals/<entryId slug>.md`。
 這份 skill 是「源」，各手冊 repo 的 `.claude/skills/` 有一份複本；改規則只改這裡，
@@ -67,6 +67,12 @@ flow-doc narrate <baseline.json> --dry-run
 ```bash
 cd site && pnpm install && pnpm dev
 ```
+
+**圖表點一下可放大**：複雜模組的序列圖寬到超出內文欄寬，mermaid 會等比縮進來，
+字就看不清了（實測 2916px 寬的流程圖在內文只有 23%，標籤 6.5px）。點任一張圖開
+全螢幕檢視——滾輪縮放、拖曳平移、雙指縮放、`0` 全景、`1` 原始大小、`Esc` 關閉。
+這一層由 `site` 一併產出 `.vitepress/theme/`（內容見 `src/site-theme.ts`），
+與 `site/` 其他檔案一樣是產生物，不要手改。
 
 ## 規模參考
 
