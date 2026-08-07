@@ -168,13 +168,18 @@ export function createSubscriptionComplete(options: LlmOptions = defaultLlmOptio
         }
       }
     } catch (err) {
-      // 這條路在容器裡是走不通的（image 沒裝平台 binary，也沒有 Claude Code 登入），
-      // 而 .env 的 ANTHROPIC_API_KEY 空著就會落到這裡。底層錯誤是「找不到執行檔」
-      // 之類的訊息，看不出真正該做什麼——把該做的事講出來，原始錯誤保留在後面
+      // 這條路要有平台 binary 才動得了，而 ANTHROPIC_API_KEY 空著就會被 resolveProvider
+      // 選中並落到這裡。底層錯誤是「找不到執行檔」之類的訊息，看不出真正該做什麼。
+      //
+      // 容器裡最常見的成因是**改了 .env 卻沒重建 image**：WITH_SUBSCRIPTION 是 build arg，
+      // 而 `docker compose run` 只要 image 在就直接用，不會因為 arg 變了而重建。
       throw new ActionableError(
-        `訂閱方案這條路啟動失敗。\n` +
-          `  這條路只在**本機**成立（要有 Claude Code 登入與平台 binary）。\n` +
-          `  容器裡請在 .env 填 ANTHROPIC_API_KEY——image 刻意不裝那個 267 MB 的 binary（D16）。\n` +
+        `訂閱方案這條路啟動失敗（找不到 Claude Code 的平台 binary 或無法啟動）。\n` +
+          `  本機：要先登入 Claude Code，且 node_modules 裝了平台 binary（別用 --no-optional）。\n` +
+          `  容器：.env 要有 WITH_SUBSCRIPTION=1 與 CLAUDE_CODE_OAUTH_TOKEN，\n` +
+          `        而且**改完要重建 image**——WITH_SUBSCRIPTION 是 build arg，\n` +
+          `        docker compose run 不會自己重建：pnpm docker:build（D16）。\n` +
+          `  或者改走 API 計費：在 .env 填 ANTHROPIC_API_KEY。\n` +
           `  原始訊息：${err instanceof Error ? err.message : String(err)}`,
         { cause: err }
       )
