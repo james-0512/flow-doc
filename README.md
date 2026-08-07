@@ -68,6 +68,12 @@ flow-doc narrate <baseline.json> --dry-run
 cd site && pnpm install && pnpm dev
 ```
 
+**圖表點一下可放大**：複雜模組的序列圖寬到超出內文欄寬，mermaid 會等比縮進來，
+字就看不清了（實測 2916px 寬的流程圖在內文只有 23%，標籤 6.5px）。點任一張圖開
+全螢幕檢視——滾輪縮放、拖曳平移、雙指縮放、`0` 全景、`1` 原始大小、`Esc` 關閉。
+這一層由 `site` 一併產出 `.vitepress/theme/`（內容見 `src/site-theme.ts`），
+與 `site/` 其他檔案一樣是產生物，不要手改。
+
 ## 規模參考
 
 對 mPHR_Frontend（753 SFC / 371 TS / 196k 行）：901 條業務流程、503 支後端端點
