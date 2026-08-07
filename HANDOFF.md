@@ -9,7 +9,7 @@ CI／容器 wiring **做完並在本機驗證過**（設計見 [LOOP.md](LOOP.md
 |---|---|
 | `trace`／`pack`／`site`／`verify`／`diff`／`reanchor`／`narrate` | 可用（前一輪交接的狀態不變） |
 | `flow-doc loop`（狀態機＋佇列＋PR 模式） | **可用**；e2e 驗證：早退 0.93s、一圈 18s、佇列重試、PR 分支推送 |
-| `Dockerfile`＋compose（loop／publish／web） | 可用；但 publish→nginx 那次全路徑驗證（950 頁、原子換版、中文路徑 200）是**掛載模式**跑的，該模式已移除（D15），clone 模式下**還沒重跑** |
+| `Dockerfile`＋compose（loop／publish／web） | 可用；publish→nginx 全路徑**已在 clone 模式下重跑並驗證**（968 頁、原子換版、中文路徑 200、換版後 nginx 免重啟跟上、releases 只留 3 版） |
 | repo 由容器 clone（D15，唯一模式） | entrypoint 的 git／install 邏輯本機實測過；**未對真實遠端 repo 跑過完整一圈** |
 | GH Actions workflows（flow-manuals repo） | **已寫好、未在 GitHub 上跑過**（需要 runner 與 secrets） |
 | narrate 線上實測 | 生成路徑**已通**——沒有 API key 時自動走 Claude Code 訂閱（D16），本機實測回得了內容；但**還沒真的寫過一章手冊** |
@@ -45,6 +45,20 @@ flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）�
   解析全失效 → 941/1894 條鏈樹形改變。熔斷器正確擋下（它的第一次真實出動）。
   結論：baseline 必須與分析環境同源（細節與 platform metadata 見 D14）。
   **D15 之後這條坑消失了**——clone 與 install 都在容器內，host 平台不再影響分析環境。
+- **相對 bind mount 遇上 GitOps 部署會靜默失效**（`./scripts/nginx.conf` 已改成烤進
+  `scripts/Dockerfile.web`）。Portainer 之類的工具把 repo clone 到**自己容器內**的
+  `/data/compose/<id>`，而 bind 來源是 **host 上的 daemon** 解析的——除非 `/data`
+  剛好 bind 在 host 同名路徑（使用者的是 named volume，即壞的那側），daemon 找不到
+  來源時會**建一個空目錄頂上去而不報錯**，nginx 於是服務預設歡迎頁。
+  鑑別診斷：`/overview`（無副檔名）若 404、`/` 若是歡迎頁，就是設定檔沒讀到。
+- **compose project name 決定 volume 前綴，而 GitOps 工具取的是 stack 名稱**——
+  同一份 compose 兩邊部署會各自建一顆，publish 寫一顆、web 讀另一顆，站台永遠空的
+  且不報錯。三顆 volume 的名字已釘死；跨 project 的 `site-dist` 設 `external: true`，
+  所以**新機器要先 `pnpm docker:volume`**，而 `docker:reset`（`down -v`）不再刪它。
+- **Git Bash 會把 URL 裡的中文轉成 Big5 再送出**（access log 看到 `%A5%FE%B0%EC`
+  而非 UTF-8 的 `%E5%85%A8`），在 host 上用 curl 測中文路徑會**假性 404**。
+  要測就從容器內發（`docker run --network flow-doc_default … curl http://web/…`），
+  檔名直接取自 volume，不讓 host 的編碼介入。
 - **`flow-doc site` 沒帶 `-m manuals` 會產出沒有敘述的骨架站**，而且很安靜——
   entrypoint 的 publish 模式已寫死這個參數，手動跑 site 時別忘。
 - e2e 測試要 clone 手冊 repo 到**短路徑**（如 `%TEMP%\fdle`）：語意 ID 檔名很長，
@@ -61,6 +75,7 @@ node <flow-doc>/dist/cli.js loop               # 真跑（本地 commit，不推
 node <flow-doc>/dist/cli.js loop --pr          # PR 模式（要 push 權限與 gh）
 
 # 容器（.env 填好 *_REPO_URL 之後；Windows 也能跑 loop 了）
+docker volume create flow-doc_site-dist                        # 新機器只做一次（site-dist 是 external）
 docker compose run --rm loop bootstrap                         # 只做一次：建 baseline
 docker compose run --rm loop --dry-run                         # 預演一圈
 docker compose run --rm loop --pr                              # 真跑（容器裡一律用 --pr）
