@@ -12,7 +12,7 @@ CI／容器 wiring **做完並在本機驗證過**（設計見 [LOOP.md](LOOP.md
 | `Dockerfile`＋compose（loop／publish／web） | 可用；publish→nginx 全路徑**已在 clone 模式下重跑並驗證**（968 頁、原子換版、中文路徑 200、換版後 nginx 免重啟跟上、releases 只留 3 版） |
 | repo 由容器 clone（D15，唯一模式） | entrypoint 的 git／install 邏輯本機實測過；**未對真實遠端 repo 跑過完整一圈** |
 | GH Actions workflows（flow-manuals repo） | **已寫好、未在 GitHub 上跑過**（需要 runner 與 secrets） |
-| narrate 線上實測 | 生成路徑**已通**——沒有 API key 時自動走 Claude Code 訂閱（D16），本機實測回得了內容；但**還沒真的寫過一章手冊** |
+| narrate 線上實測 | 生成路徑**已通**——沒有 API key 時自動走 Claude Code 訂閱（D16）。**容器內**（`WITH_SUBSCRIPTION=1` image）煙霧測試通過：4.9s、內容正確、`stop_reason: end_turn`。但**還沒真的寫過一章手冊** |
 
 flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）。
 **兩邊都沒推——推送要先問過使用者。**
@@ -55,6 +55,10 @@ flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）�
   同一份 compose 兩邊部署會各自建一顆，publish 寫一顆、web 讀另一顆，站台永遠空的
   且不報錯。三顆 volume 的名字已釘死；跨 project 的 `site-dist` 設 `external: true`，
   所以**新機器要先 `pnpm docker:volume`**，而 `docker:reset`（`down -v`）不再刪它。
+- **訂閱路徑每次呼叫固定扛約 17.6k token 的 harness 系統提示**（實測 `cacheWrite: 17604`，
+  而 user prompt 只有 2 token）。`allowedTools: []` 與 `settingSources: []` 都設了也一樣——
+  那是 Agent SDK 自己的 harness prompt，不是我們的。訂閱模式下花的是額度不是錢，但
+  估算一輪要燒多少額度時要把它算進去（每章一次）。改走 API 計費時這筆會變成實際費用。
 - **Git Bash 會把 URL 裡的中文轉成 Big5 再送出**（access log 看到 `%A5%FE%B0%EC`
   而非 UTF-8 的 `%E5%85%A8`），在 host 上用 curl 測中文路徑會**假性 404**。
   要測就從容器內發（`docker run --network flow-doc_default … curl http://web/…`），
