@@ -148,20 +148,38 @@ analyzer 規則一改，diff 會把幾百條流程誤報成 changed——行為�
 失敗通知、artifacts、PR 整合。設計刻意不耦合平台——GitHub Actions／Azure DevOps／
 GitLab 的 scheduled pipeline 同構。
 
-## 容器化：兩個服務，PR 模式
+## 容器化：一行啟用，PR 模式
 
 批次與服務是**兩個生命週期完全不同的東西**，不能塞進同一個容器：
 
-| 服務 | 生命週期 | 做什麼 |
-|---|---|---|
-| `loop`（批次） | `restart: no`，跑完退出 | 分析 → diff → 產敘述 → 開 PR |
-| `web`（長駐） | `restart: always` | nginx 服務靜態站，24h 開著 |
+| 服務 | 生命週期 | `up -d` 會啟動 | 做什麼 |
+|---|---|---|---|
+| `bootstrap`（批次） | `restart: no`，跑完退出 | ✅ | 產第一份 baseline 並開 PR；已有就跳過（冪等） |
+| `publish`（批次） | `restart: no`，跑完退出 | ✅ | 建站台、原子換版 |
+| `loop`（批次） | `restart: no`，跑完退出 | ❌ `profiles: [batch]` | 分析 → diff → 產敘述 → 開 PR |
+| `web`（長駐） | `restart: always` | ✅ | nginx 服務靜態站，24h 開著 |
 
-兩者用**具名 volume** 交換站台產物。不可以邊 build 邊服務同一個目錄——
+批次與服務用**具名 volume** 交換站台產物。不可以邊 build 邊服務同一個目錄——
 build 到暫存目錄再原子換版，否則使用者會讀到半套站。
 
-**compose 不排程。** 它只定義服務；排程是外部的——host 排程器呼叫
-`docker compose run --rm loop`，或 CI 排程、compose 只提供 runner 映像。
+**啟用是一行 `docker compose up -d`**：build → bootstrap → publish → web，靠
+`depends_on: {condition: service_completed_successfully}` 串起來。全新機器除了 `.env`
+不需要別的準備，GitOps 工具部署這份檔案時走的也是這條路。唯一還要人的是合併
+bootstrap 那個 PR。
+
+**但 compose 仍然不排程。** `up -d` 做的是**一次性啟用**，不是日常那一圈——`loop`
+刻意留在 `profiles: [batch]` 裡，`up` 碰不到它。理由：它會開 PR、燒 LLM 額度，那是
+排程器的決定，不是「部署」該順手做的事。日常仍由 host 排程器或 CI 呼叫
+`docker compose run --rm loop --pr`。
+
+三個實測出來、不能拿掉的細節：
+
+- **`depends_on` 不會自動啟用 profile。** 指到 `profiles: [batch]` 裡的服務時那個
+  服務被**整個跳過且不報錯**。所以 `publish` 必須留在 profile 外。
+- **`required: false` 是站台的可用性保險。** 少了它，publish 失敗會讓 web 起不來——
+  本來只是內容沒更新，變成整個站掛掉。原子換版本來就是為了解耦這兩件事。
+- **`build` 不能只掛在 `loop` 上。** loop 在 profile 裡不會被 `up` 啟動，連帶它的
+  build 也不觸發，bootstrap／publish 就會找不到映像。三個服務共用同一份 build anchor。
 
 ### 三個對象，三種進到容器的方式
 

@@ -125,22 +125,40 @@ case "$MODE" in
   # 產物走 PR 而不是直接推 main：這份 commit 動輒上千個封包，跟 loop 的 PR 模式
   # 用同一條路徑比較不會出意外。
   bootstrap)
+    FORCE=no
+    for arg in "$@"; do
+      if [ "$arg" = "--force" ]; then FORCE=yes; fi
+    done
+
+    # ⚠ 這兩個檢查刻意放在 clone 目標 repo **之前**。
+    #
+    # compose 的依賴鏈讓 `up -d` 每次都會跑到 bootstrap，而絕大多數時候它無事可做。
+    # 檢查若放在 clone＋install 之後，等於每次部署都要付一次完整 clone 與 pnpm
+    # install 的代價，才發現沒事可做。放在前面的話已 bootstrap 過的機器 2 秒就退出。
+    # （手冊 repo 在 case 之前就已經 clone 好了，所以這裡讀得到 flow-chains.json。）
+    #
+    # BOOTSTRAP_AUTO=1 是給 compose 依賴鏈用的：exit 0 安靜跳過，而不是 exit 1。
+    # 手動跑時不設它——那時「已經有 baseline」是使用者該知道的事，要大聲講。
+    if [ -f "$FLOW_MANUALS_DIR/$FLOW_DOC_TARGET_NAME/flow-chains.json" ] && [ "$FORCE" = no ]; then
+      if [ "${BOOTSTRAP_AUTO:-0}" = "1" ]; then
+        echo "[bootstrap] 已有 baseline，跳過（自動模式）"
+        exit 0
+      fi
+      # 已經有 baseline 還重建，會讓下一輪的 diff 以新環境為準——若兩者環境不同，
+      # 那就是一次「整本手冊重寫」的規模。要做可以，但必須是明確的決定
+      echo "已經有 baseline（flow-chains.json）。重建請確認你真的要換分析環境，然後加 --force" >&2
+      exit 1
+    fi
+    if [ -z "${TARGET_REPO_URL:-}" ] && [ "${BOOTSTRAP_AUTO:-0}" = "1" ]; then
+      echo "[bootstrap] 沒有 TARGET_REPO_URL，跳過（自動模式）——只想跑站台的話這是正常的"
+      exit 0
+    fi
+
     : "${FLOW_DOC_TARGET:?需要 FLOW_DOC_TARGET（目標 repo 的 clone 目的地）}"
     : "${TARGET_REPO_URL:?需要 TARGET_REPO_URL（目標 repo 的 git URL）——填在 .env}"
     prepare_repo "$TARGET_REPO_URL" "${TARGET_REPO_REF:-main}" "$FLOW_DOC_TARGET" "目標 repo"
     prepare_target_env "$FLOW_DOC_TARGET"
     cd "$FLOW_MANUALS_DIR/$FLOW_DOC_TARGET_NAME"
-
-    FORCE=no
-    for arg in "$@"; do
-      if [ "$arg" = "--force" ]; then FORCE=yes; fi
-    done
-    # 已經有 baseline 還重建，會讓下一輪的 diff 以新環境為準——若兩者環境不同，
-    # 那就是一次「整本手冊重寫」的規模。要做可以，但必須是明確的決定
-    if [ -f flow-chains.json ] && [ "$FORCE" = no ]; then
-      echo "已經有 baseline（flow-chains.json）。重建請確認你真的要換分析環境，然後加 --force" >&2
-      exit 1
-    fi
 
     STAMP="$(date +%Y%m%d%H%M%S)"
     BRANCH="bootstrap/$FLOW_DOC_TARGET_NAME/$STAMP"

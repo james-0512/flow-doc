@@ -53,8 +53,13 @@ flow-doc 領先 origin 數個 commit、flow-manuals 領先 1 個（CI wiring）�
   鑑別診斷：`/overview`（無副檔名）若 404、`/` 若是歡迎頁，就是設定檔沒讀到。
 - **compose project name 決定 volume 前綴，而 GitOps 工具取的是 stack 名稱**——
   同一份 compose 兩邊部署會各自建一顆，publish 寫一顆、web 讀另一顆，站台永遠空的
-  且不報錯。三顆 volume 的名字已釘死；跨 project 的 `site-dist` 設 `external: true`，
-  所以**新機器要先 `pnpm docker:volume`**，而 `docker:reset`（`down -v`）不再刪它。
+  且不報錯。三顆 volume 的名字因此都已釘死（`flow-doc_*`），與 project 無關。
+  跨 project 驅動 publish 時 compose 只多印一行警告，仍正常掛上（實測）。
+- **`depends_on` 不會自動啟用 profile**（實測）——指到 `profiles: [batch]` 裡的服務時，
+  那個服務會被**整個跳過且不報錯**，`required: false` 讓它連警告都沒有。所以 publish
+  必須留在 profile 外，web 才等得到它。`loop` 則刻意留在 profile 裡：`up -d` 碰不到它。
+- **`required: false` 是站台可用性的保險，不能拿掉**。少了它，publish 失敗會讓 web
+  起不來——本來只是內容沒更新，變成整個站掛掉。原子換版本來就是為了解耦這兩件事。
 - **訂閱路徑每次呼叫固定扛約 17.6k token 的 harness 系統提示**（實測 `cacheWrite: 17604`，
   而 user prompt 只有 2 token）。`allowedTools: []` 與 `settingSources: []` 都設了也一樣——
   那是 Agent SDK 自己的 harness prompt，不是我們的。訂閱模式下花的是額度不是錢，但
@@ -78,12 +83,17 @@ node <flow-doc>/dist/cli.js loop --dry-run     # 預演
 node <flow-doc>/dist/cli.js loop               # 真跑（本地 commit，不推）
 node <flow-doc>/dist/cli.js loop --pr          # PR 模式（要 push 權限與 gh）
 
-# 容器（.env 填好 *_REPO_URL 之後；Windows 也能跑 loop 了）
-docker volume create flow-doc_site-dist                        # 新機器只做一次（site-dist 是 external）
-docker compose run --rm loop bootstrap                         # 只做一次：建 baseline
-docker compose run --rm loop --dry-run                         # 預演一圈
-docker compose run --rm loop --pr                              # 真跑（容器裡一律用 --pr）
-docker compose run --rm publish && docker compose up -d web    # http://localhost:8080
+# 容器：全新機器只要填好 .env，這一行就到位
+docker compose up -d          # build → bootstrap（開 PR，已有 baseline 就跳過）
+                              # → publish（建站＋原子換版）→ web 開站
+                              # 之後只剩「合併 bootstrap 那個 PR」需要人
+
+# 個別動作（up 不會碰 loop——它在 profiles: [batch] 裡，開 PR 燒額度是排程器的事）
+docker compose run --rm loop --dry-run          # 預演一圈
+docker compose run --rm loop --pr               # 真跑（容器裡一律用 --pr）
+docker compose run --rm loop bootstrap --force  # 手動重建 baseline（換分析環境時）
+docker compose run --rm publish                 # 只重建站台
+docker compose up -d --no-deps web              # 只重啟站台，不觸發整條鏈
 ```
 
 容器裡不帶 `--pr` 的話 loop 只會在 volume 裡 commit，沒有人看得到。

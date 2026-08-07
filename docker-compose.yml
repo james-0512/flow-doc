@@ -1,15 +1,28 @@
 # repo 一律由容器自己 clone／fetch 到常駐 volume——host 上什麼都不用先準備。
 # （曾經有個 bind mount host 路徑的「掛載模式」，已移除，理由見 DECISIONS D15。）
 #
-# 兩個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
-#   loop／publish  批次，跑完退出（restart: no），排程器用 `docker compose run --rm` 呼叫
-#   web            長駐 nginx，服務靜態站
+# ── 啟用：一行指令 ─────────────────────────────────────────────────────
 #
-# compose 不排程。排程是外部的：host 排程器或 CI cron 呼叫
-#   docker compose run --rm loop bootstrap  # 只做一次：產生第一份 baseline 並開 PR
+#   docker compose up -d
+#
+# 這一行會做完：build 映像 → bootstrap（產 baseline 並開 PR，已有就 2 秒跳過）
+# → publish（建站台、原子換版）→ web（開站）。全新機器上除了填 .env 之外不需要
+# 別的準備，GitOps 工具（Portainer stack 之類）部署這份檔案時走的也是這條路。
+#
+# **唯一還需要人的一步：合併 bootstrap 開的那個 PR。** 合併之後 loop 才有比對基準。
+# 這是刻意的——那份 commit 動輒上千個封包，值得看一眼。
+#
+# 四個服務、兩種生命週期（LOOP.md〈容器化：兩個服務，PR 模式〉）：
+#   bootstrap／publish  批次，`up -d` 會帶著跑，跑完退出（restart: no）
+#   loop                批次，**在 profiles: [batch] 裡，`up -d` 不會碰它**——
+#                       它會開 PR、燒 LLM 額度，那是排程器的決定，不是部署的
+#   web                 長駐 nginx，服務靜態站
+#
+# compose 不排程。日常那一圈仍由外部觸發（host 排程器或 CI cron）：
 #   docker compose run --rm loop --pr       # 跑一圈（容器裡請一律用 --pr，見下）
-#   docker compose run --rm publish         # merge 後重建站台並原子換版
-#   docker compose up -d web                # 站台常駐
+#   docker compose run --rm loop bootstrap  # 手動重建 baseline（已有的話要加 --force）
+#   docker compose run --rm publish         # 只重建站台，不動別的
+#   docker compose up -d --no-deps web      # 只重啟站台，不觸發整條鏈
 #
 # ⚠ 容器裡跑 loop 要帶 `--pr`。不帶的話 loop 只在本地 commit、不 push，而這裡的
 #   「本地」是容器的 volume——沒有人看得到，下次 fetch 也只會讓它愈積愈多。
@@ -42,40 +55,72 @@
 #   platform 與該環境的模組解析結果，換環境的第一輪會大量 changed 被熔斷器擋下
 #   （不會寫壞東西，但那輪白跑）。先在容器內跑一次 trace＋pack 並 commit。
 
+# 三個服務共用同一份 build 設定與同一顆映像（loop／bootstrap／publish 是同一個
+# image 的三種模式）。用 anchor 而不是抄三遍：抄三遍遲早會有一份忘了改。
+#
+# ⚠ build 不能只掛在 loop 上。loop 在 profiles: [batch] 底下，`up -d` 不會啟動它，
+#   連帶它的 build 也不會觸發——那樣 bootstrap／publish 就會找不到 flow-doc:latest。
+x-flow-doc-build: &flow-doc-build
+  context: .
+  # 1 = 把 Claude Code 的平台 binary 裝進 image，改用訂閱額度跑 narrate。
+  # 只適合「自己的機器、自己的登入、只有自己用」——共用 CI 不行（D16）
+  args:
+    WITH_SUBSCRIPTION: ${WITH_SUBSCRIPTION:-0}
+
+# 分析環境的變數：loop 與 bootstrap 必須完全一致——bootstrap 產的 baseline 就是
+# loop 之後拿來比對的基準，兩者環境不同的話第一輪必定滿江紅（D14）
+x-analysis-env: &analysis-env
+  FLOW_DOC_TARGET: /workspace/target
+  FLOW_MANUALS_DIR: /workspace/manuals
+  TARGET_REPO_URL: ${TARGET_REPO_URL:-}
+  TARGET_REPO_REF: ${TARGET_REPO_REF:-main}
+  MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
+  MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
+  TARGET_INSTALL_CMD: ${TARGET_INSTALL_CMD-pnpm install --frozen-lockfile}
+  TARGET_CODEGEN_CMD: ${TARGET_CODEGEN_CMD-pnpm generate:components-dts}
+  # pnpm store 放同一顆 volume：跨輪留著，而且要與 node_modules 同一個檔案系統
+  # 才能走硬連結（不同 fs 會退化成整包複製）
+  npm_config_store_dir: /workspace/.pnpm-store
+  FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # 訂閱模式用。兩個都填的話 API key 優先（Claude Code 的既定行為，也是
+  # flow-doc resolveProvider 的判定順序）
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  GH_TOKEN: ${GH_TOKEN:-}
+  GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
+  GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
+
 services:
-  # workspace volume 常駐，跨輪保留 clone、node_modules 與 pnpm store：
-  # 第一次跑要完整 clone＋install（慢），之後只 fetch＋快轉，lockfile 沒變就跳過安裝。
+  # 啟用閉環的第一步，`up -d` 會帶著跑。**冪等**：已經有 baseline 就 2 秒內跳過
+  # （BOOTSTRAP_AUTO=1 讓它 exit 0 而不是 exit 1，否則每次 up 都會噴一次錯誤）。
+  #
+  # 與 loop 共用 workspace volume——刻意的：baseline 必須在 loop 之後要用的那個
+  # 分析環境裡產生。
+  #
+  # ⚠ 它的產物是一個 **PR**，還是要人合併，`up` 只幫你跑到開 PR 為止。
+  bootstrap:
+    build: *flow-doc-build
+    image: flow-doc:latest
+    restart: "no"
+    init: true
+    command: ["bootstrap"]
+    environment:
+      <<: *analysis-env
+      # 自動模式：已有 baseline／沒填 TARGET_REPO_URL 時安靜跳過（exit 0），
+      # 不要擋住後面的 publish 與 web。手動跑時不設它，維持原本的大聲拒絕
+      BOOTSTRAP_AUTO: "1"
+    volumes:
+      - workspace:/workspace
+
+  # 日常增量圈。**唯一留在 profiles: [batch] 的服務**——`up -d` 絕對不能碰它：
+  # 它會開 PR、燒 LLM 額度，那是排程器（CI／cron）該決定的事，不是部署該做的事。
   loop:
-    build:
-      context: .
-      # 1 = 把 Claude Code 的平台 binary 裝進 image，改用訂閱額度跑 narrate。
-      # 只適合「自己的機器、自己的登入、只有自己用」——共用 CI 不行（D16）
-      args:
-        WITH_SUBSCRIPTION: ${WITH_SUBSCRIPTION:-0}
+    build: *flow-doc-build
     image: flow-doc:latest
     profiles: [batch]
     restart: "no"
     init: true
-    environment:
-      FLOW_DOC_TARGET: /workspace/target
-      FLOW_MANUALS_DIR: /workspace/manuals
-      TARGET_REPO_URL: ${TARGET_REPO_URL:-}
-      TARGET_REPO_REF: ${TARGET_REPO_REF:-main}
-      MANUALS_REPO_URL: ${MANUALS_REPO_URL:-}
-      MANUALS_REPO_REF: ${MANUALS_REPO_REF:-main}
-      TARGET_INSTALL_CMD: ${TARGET_INSTALL_CMD-pnpm install --frozen-lockfile}
-      TARGET_CODEGEN_CMD: ${TARGET_CODEGEN_CMD-pnpm generate:components-dts}
-      # pnpm store 放同一顆 volume：跨輪留著，而且要與 node_modules 同一個檔案系統
-      # 才能走硬連結（不同 fs 會退化成整包複製）
-      npm_config_store_dir: /workspace/.pnpm-store
-      FLOW_DOC_TARGET_NAME: ${FLOW_DOC_TARGET_NAME:-mPHR_Frontend}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # 訂閱模式用。兩個都填的話 API key 優先（Claude Code 的既定行為，也是
-      # flow-doc resolveProvider 的判定順序）
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      GH_TOKEN: ${GH_TOKEN:-}
-      GIT_USER_NAME: ${GIT_USER_NAME:-flow-doc-loop}
-      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-flow-doc-loop@localhost}
+    environment: *analysis-env
     volumes:
       - workspace:/workspace
 
@@ -85,9 +130,12 @@ services:
   #
   # 推論：站台只反映**已推上 origin 的**手冊。要預覽還沒推的本地修改，用原生
   # `flow-doc site -m manuals` 加 vitepress dev，不要走這條。
+  #
+  # 不在 profile 裡：web 靠 depends_on 等它跑完，而 depends_on **不會**自動啟用
+  # profile（實測：批次服務會被整個跳過，沒有任何錯誤）。
   publish:
+    build: *flow-doc-build
     image: flow-doc:latest
-    profiles: [batch]
     restart: "no"
     init: true
     command: ["publish"]
@@ -116,6 +164,16 @@ services:
       - "${SITE_PORT:-8080}:80"
     volumes:
       - site-dist:/site:ro
+    # 等 publish 跑完再開站，全新機器才不會先端出一個空的 404。
+    #
+    # ⚠ `required: false` 不能拿掉。少了它，publish 失敗（網路斷、git 分岔、
+    #   vitepress build 壞掉）會**連帶讓站台起不來**——本來只是內容沒更新，變成
+    #   整個站掛掉。有它就只是警告一行，web 照樣端出 volume 裡的上一版。
+    #   原子換版的設計本來就是為了讓這兩件事解耦，別在這裡把它綁回去。
+    depends_on:
+      publish:
+        condition: service_completed_successfully
+        required: false
 
 # volume 名字**明確釘死**，不吃 compose project 前綴。
 #
@@ -126,15 +184,15 @@ services:
 # 名字沿用既有的 flow-doc_*（看起來像前綴，但現在是明確指定）：換名字會讓
 # workspace 變成空的新 volume，目標 repo 的完整 clone 與 node_modules 都要重來。
 volumes:
-  # 唯一跨 project 的一顆（publish 寫、web 讀，而這兩者可能由不同工具部署），
-  # 所以要 external——只釘 name 的話 compose 會警告「這顆是 project X 建的」，
-  # 目前它只警告不擋，但那是它明講不保證的行為。external 是它指定的做法。
+  # publish 寫、web 讀。曾經設成 external（compose 對跨 project 共用的官方做法），
+  # 但那要求新機器先手動 `docker volume create`——而現在 publish 與 web 同在一個
+  # compose 檔、同一個 project，`up -d` 一條龍就要能跑，多一個前置步驟不划算。
+  # 只釘 name 就已經保證兩者指向同一顆實體 volume；跨 project 時 compose 只是多印
+  # 一行「這顆是 project X 建的」警告，仍會正常掛上（實測）。
   #
-  # 代價一：新機器要先手動建（`pnpm docker:volume`，或 `docker volume create`）。
-  # 代價二：`docker compose down -v`（docker:reset）**不會**刪它——站台產物會活過
-  # reset。要連站台一起砍就自己 `docker volume rm flow-doc_site-dist`。
+  # 若你堅持從別的 project 驅動 publish（例如自己的 checkout 對上 Portainer stack），
+  # 加 `-p flow-doc` 讓兩邊 project 名一致，警告就不會出現。
   site-dist:
-    external: true
     name: flow-doc_site-dist
   # 這兩顆只有批次容器碰得到（永遠是同一個 project），不需要 external
   workspace:
