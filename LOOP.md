@@ -278,7 +278,7 @@ diff 結果直接產出站上「本次變更」頁：這一版動了哪些業務
 | `flow-doc loop` 指令（真實步驟組裝：trace／diff／pack／歸檔／reanchor／narrate／verify／commit／PR） | `src/cli.ts` |
 | 共用編排（CLI 單步指令與 loop 用同一份） | `writePackets`／`reanchorAll`／`narrateTargets` |
 | runner 映像（工具烤進映像；loop 與 publish 兩種模式） | `Dockerfile`＋`scripts/container-entrypoint.sh` |
-| 兩個服務與共用 volume | `docker-compose.yml`＋`scripts/nginx.conf` |
+| 兩個服務與共用 volume | `docker-compose.yml`＋`scripts/nginx.conf`（烤進 `scripts/Dockerfile.web`） |
 | nightly 排程＋手動觸發（PR 模式）、merge 後部署 | flow-manuals 的 `.github/workflows/flow-doc-{loop,publish}.yml` |
 
 閉環的狀態全在手冊 repo：baseline `flow-chains.json`、`manuals/`（歸檔進 `manuals/archive/`）、
