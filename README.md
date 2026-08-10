@@ -74,6 +74,11 @@ cd site && pnpm install && pnpm dev
 這一層由 `site` 一併產出 `.vitepress/theme/`（內容見 `src/site-theme.ts`），
 與 `site/` 其他檔案一樣是產生物，不要手改。
 
+**全站骨架圖不是工具產的**，是 flow-manual skill 寫的：`overviews/00-全站.md` 裡的一張
+Mermaid flowchart（路由切換 → 全域前置守衛 → 業務域操作 → API 攔截器 → 後端），
+由 `site` 渲染成 `/overview`。`narrate` 不碰 `overviews/`，那一步刻意留給人跑 skill。
+工具做過一版互動圖，比不上這個——理由與三次撞牆的過程記在 [DECISIONS.md](DECISIONS.md) D17。
+
 ## 規模參考
 
 對 mPHR_Frontend（753 SFC / 371 TS / 196k 行）：901 條業務流程、503 支後端端點
