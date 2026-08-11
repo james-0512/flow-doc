@@ -337,7 +337,11 @@ export function groupByHandler(chains: FlowChain[]): Map<FlowChain, FlowChain[]>
   const buckets = new Map<string, FlowChain[]>()
   for (const c of chains) {
     if (!c.root) continue
-    const key = `${c.root.loc.file}:${c.root.loc.line}`
+    // 推播不與使用者觸發併章，即使 handler 是同一個。「使用者按刷新」與
+    // 「後端推播 Refresh」走同一條程式碼路徑，但業務事實不同——併進去的話，
+    // 「不需使用者動作也會更新」這件事在手冊裡就查不到了
+    const scope = c.entryKind === 'SYSTEM_PUSH' ? 'push:' : ''
+    const key = `${scope}${c.root.loc.file}:${c.root.loc.line}`
     const bucket = buckets.get(key)
     if (bucket) bucket.push(c)
     else buckets.set(key, [c])

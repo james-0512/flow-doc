@@ -48,6 +48,7 @@ export function flowTitle(chain: FlowChain, manual?: string): string {
   if (chain.entryKind === 'CROSSCUT') return chain.label
   const base = path.posix.basename(chain.entryLoc.file)
   if (chain.entryKind === 'LIFECYCLE') return `${base} 載入時（${chain.trigger}）`
+  if (chain.entryKind === 'SYSTEM_PUSH') return `${base} 收到推播（${chain.trigger}）`
   return chain.tag ? `${base} · ${chain.tag} @${chain.trigger}` : `${base} · @${chain.trigger}`
 }
 

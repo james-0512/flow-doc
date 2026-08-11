@@ -10,5 +10,12 @@
     "src/api/",
     "src/router/"
   ],
-  "crosscut": [{ "file": "src/utils/service/api.service.ts", "label": "API 請求／回應攔截器" }]
+  "crosscut": [{ "file": "src/utils/service/api.service.ts", "label": "API 請求／回應攔截器" }],
+  "push": [
+    {
+      "receiverPattern": "(connection|conn|hub|signalR)",
+      "methods": ["on", "subscribe"],
+      "label": "SignalR 推播"
+    }
+  ]
 }

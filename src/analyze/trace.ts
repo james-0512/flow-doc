@@ -242,7 +242,7 @@ function resolveDottedHandler(sf: SourceFile, name: string): Node[] {
   for (const obj of objectSourcesOf(decl)) {
     const prop = obj.getProperty(propName)
     if (!prop) continue
-    for (const fn of propertyFunctions(prop)) {
+    for (const fn of functionsOf(prop)) {
       const key = keyOf(fn)
       if (seen.has(key)) continue
       seen.add(key)
@@ -343,23 +343,29 @@ function objectLiteralsIn(expr: Node, depth = 0): ObjectLiteralExpression[] {
 }
 
 /**
- * 屬性值 → 函式節點。
+ * 任意節點 → 它指向的函式。
  *
- * `okFn: () => …` 由 toFunctionLike 直接處理；`okFn: updateHandler` 的值是識別字，
- * 而 toFunctionLike 刻意不跟識別字（跟了會改變它在別處的行為），所以這裡自己用
- * Type Checker 跳過去。
+ * `okFn: () => …`、`subscribe('X', () => …)` 由 toFunctionLike 直接處理；
+ * `okFn: updateHandler`、`subscribe('X', refreshHandler)` 的值是**識別字**，
+ * 而 toFunctionLike 刻意不跟識別字（跟了會改變它在別處的行為），所以這裡自己
+ * 用 Type Checker 跳過去。
  */
-function propertyFunctions(prop: Node): Node[] {
-  const direct = toFunctionLike(prop)
+function functionsOf(node: Node): Node[] {
+  const direct = toFunctionLike(node)
   if (direct) return [direct]
 
-  const init = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined
-  if (!init || !Node.isIdentifier(init)) return []
+  const value = Node.isPropertyAssignment(node) ? node.getInitializer() : node
+  if (!value || !Node.isIdentifier(value)) return []
 
   const out: Node[] = []
-  for (const def of init.getDefinitionNodes()) {
+  const seen = new Set<string>()
+  for (const def of value.getDefinitionNodes()) {
     const fn = toFunctionLike(def)
-    if (fn) out.push(fn)
+    if (!fn) continue
+    const key = keyOf(fn)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(fn)
   }
   return out
 }
@@ -659,6 +665,19 @@ function resolveEntryFunctions(t: Tracer, entry: EntryCandidate): Node[] {
     return []
   }
 
+  // 推播：`conn.on('UpdateList', handler)` 的第二個引數就是流程起點。
+  // 靠行號 ＋ 事件名對齊——同一行不可能有兩個同事件名的訂閱
+  if (entry.kind === 'SYSTEM_PUSH') {
+    for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      if (call.getStartLineNumber() !== entry.loc.line) continue
+      const [event, handler] = call.getArguments()
+      if (!event || !handler) continue
+      if (!Node.isStringLiteral(event) || event.getLiteralText() !== entry.trigger) continue
+      return functionsOf(handler)
+    }
+    return []
+  }
+
   return resolveHandlerCandidates(t, entry.file, entry.handlerName)
 }
 
@@ -839,7 +858,9 @@ export function traceEntries(
 
   // ROUTE 不獨立追鏈：進入頁面實際執行的是該元件的 lifecycle，
   // 那些已由 LIFECYCLE entry 覆蓋，重複追只會產生兩份相同的鏈。
-  const traceable = scan.entries.filter(e => e.kind === 'UI_EVENT' || e.kind === 'LIFECYCLE')
+  const traceable = scan.entries.filter(
+    e => e.kind === 'UI_EVENT' || e.kind === 'LIFECYCLE' || e.kind === 'SYSTEM_PUSH'
+  )
 
   for (const entry of traceable) {
     let root: ChainNode | null = null
@@ -850,7 +871,7 @@ export function traceEntries(
     if (fns.length > 1) {
       // 多候選的觸發點：合成根節點掛住 N 棵子樹。不能挑一個——`modalInfo.okFn`
       // 在新增／編輯兩個分支各指一個函式，挑一個就等於刪掉另一半流程
-      root = candidateRoot(t, fns, entry.handlerName!, entry.loc, 0, state, opts, false)
+      root = candidateRoot(t, fns, entry.handlerName ?? entry.trigger, entry.loc, 0, state, opts, false)
     } else if (fn) {
       state.visited.add(keyOf(fn))
       state.expanded.add(keyOf(fn))

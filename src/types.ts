@@ -31,6 +31,17 @@ export type EntryKind =
   | 'LIFECYCLE'
   /** 路由定義本身（進入某頁） */
   | 'ROUTE'
+  /**
+   * 後端主動推播（SignalR 之類）註冊的 handler。
+   *
+   * 它不是既有鏈的延伸，而是**新的流程起點**：handler 被觸發時前面沒有使用者
+   * 動作。少了這個類型，即時通知、看板即時更新的流程在手冊裡只有「使用者主動
+   * 觸發」的那一半。
+   *
+   * 註冊點的事件名是字串常數、callback 就寫在同一個呼叫裡，所以不需要 emit
+   * 那種跨檔 join——取法與 `onMounted(fn)` 相同。
+   */
+  | 'SYSTEM_PUSH'
 
 /** entry point 候選。
  *
@@ -110,6 +121,10 @@ export interface ScanStats {
   dynamicEventBindings: number
   /** 標籤解析不到檔案的 listener 數 */
   unresolvedComponentTags: number
+  /** 認出的推播訂閱點（`config.push` 沒設就是 0） */
+  pushSubscriptions: number
+  /** 事件名不是字串常數而略過的推播訂閱——轉發層（`conn.on(eventName, cb)`）就是這種 */
+  pushDynamicEvents: number
   elapsedMs: number
 }
 

@@ -78,7 +78,13 @@ function scan(rel: string, source: string, ctx?: Partial<DetectContext>) {
   const sfc = parseSfc(rel, source)
   const facts = sfc.virtualTs
     ? extractScriptFacts(`${rel}.ts`, sfc.virtualTs)
-    : { componentImports: new Map(), declaredNames: new Set<string>(), lifecycle: [] }
+    : {
+        componentImports: new Map(),
+        declaredNames: new Set<string>(),
+        lifecycle: [],
+        push: [],
+        pushDynamicEvents: 0
+      }
   return scanSfc({ config, globalComponents: new Map(), files: new Set(), ...ctx }, sfc, facts)
 }
 
