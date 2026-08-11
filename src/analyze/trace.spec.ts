@@ -101,6 +101,48 @@ describe('call chain 追蹤（fixture）', () => {
     expect(chainOf('IndexView.vue#button.click').flowKind).toBe('write')
   })
 
+  describe('點號 handler（`@click="modalInfo.okFn"`）', () => {
+    it('兩個分支的實作都追出來，不挑一個當答案', () => {
+      const chain = chainOf('DemoModal.vue#UtilButton.click@modalInfo.okFn')
+      // 根節點只是「這裡分岔」的標記，不對應任何一段原始碼
+      expect(chain.root!.candidates).toHaveLength(2)
+      expect(chain.root!.endLine).toBeUndefined()
+      expect(names(chain.root!)).toEqual(
+        expect.arrayContaining(['modalInfo.okFn', 'updateHandler', 'createHandler'])
+      )
+    })
+
+    it('候選底下的副作用照樣收，流程分類不受影響', () => {
+      const chain = chainOf('DemoModal.vue#UtilButton.click@modalInfo.okFn')
+      expect(chain.flowKind).toBe('write')
+      expect(chain.effects.find(e => e.kind === 'HTTP_API')).toMatchObject({
+        detail: 'POST /api/v1/demo/create',
+        mutating: true
+      })
+    })
+
+    it('屬性值是行內箭頭函式也解得到', () => {
+      const chain = chainOf('DemoModal.vue#UtilButton.dblclick@modalInfo.cancelFn')
+      expect(chain.root!.candidates).toHaveLength(2)
+      expect(chain.flowKind).toBe('read')
+    })
+
+    it('三元回傳的兩個分支也要收——`return cond ? {…} : {…}`', () => {
+      const chain = chainOf('DemoModal.vue#UtilButton.focus@ternaryInfo.okFn')
+      expect(chain.root!.candidates).toHaveLength(2)
+      expect(names(chain.root!)).toEqual(expect.arrayContaining(['updateHandler', 'createHandler']))
+    })
+
+    it('entry ID 不因多候選而改變——手冊檔名靠它對回流程', () => {
+      const ids = trace.chains.filter(c => c.entryId.includes('DemoModal.vue')).map(c => c.entryId)
+      expect(ids).toEqual([
+        'src/views/Demo/DemoModal.vue#UtilButton.click@modalInfo.okFn',
+        'src/views/Demo/DemoModal.vue#UtilButton.dblclick@modalInfo.cancelFn',
+        'src/views/Demo/DemoModal.vue#UtilButton.focus@ternaryInfo.okFn'
+      ])
+    })
+  })
+
   it('同一份程式碼跑兩次必須得到完全相同的結果', async () => {
     // 閉環的前提。分析器只要有任何順序浮動（glob 回傳序、listener 展開序），
     // 同一個 commit 每晚都會被判成有變更，於是每晚重寫、永遠燒 token。

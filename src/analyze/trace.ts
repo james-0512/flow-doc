@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { Node, SyntaxKind } from 'ts-morph'
-import type { CallExpression, SourceFile } from 'ts-morph'
+import type { CallExpression, ObjectLiteralExpression, SourceFile } from 'ts-morph'
 import { classifyPath } from '../config.js'
 import type { AnalyzerConfig } from '../config.js'
 import { sourceSignature } from '../signature.js'
@@ -202,6 +202,208 @@ function resolveNamedHandler(t: Tracer, rel: string, name: string | undefined): 
 }
 
 /**
+ * handler 名稱 → 實作候選。單純的名字最多一個，`a.b` 這種可能有多個。
+ *
+ * 回陣列而不是單一節點，是因為 `@ok="modalInfo.okFn"` 這種寫法在目標專案裡的
+ * 典型形狀是「新增／編輯兩個分支各指一個函式」——兩個都是真的，挑一個當答案
+ * 就等於把另一半流程從手冊裡刪掉。
+ */
+function resolveHandlerCandidates(t: Tracer, rel: string, name: string | undefined): Node[] {
+  if (!name) return []
+  if (!name.includes('.')) {
+    const fn = resolveNamedHandler(t, rel, name)
+    return fn ? [fn] : []
+  }
+  const sf = sourceFileFor(t, rel)
+  return sf ? resolveDottedHandler(sf, name) : []
+}
+
+/** 包一層的響應式建構子——真正的物件在引數或它回傳的值裡。 */
+const OBJECT_WRAPPERS = new Set(['ref', 'reactive', 'computed', 'shallowRef', 'shallowReactive'])
+
+/**
+ * `modalInfo.okFn` → 物件屬性上的 handler。
+ *
+ * 只解**同檔宣告的變數上的單層屬性**。再往下（`a.b.c`）、`v-for` 的迴圈變數、
+ * 事後指派（`obj.fn = x`）都需要 data-flow 分析，那是另一個量級的成本且誤判會
+ * 產生假步驟——照舊記成解析不到，讓它出現在 `unresolvedHandlerTop` 裡。
+ */
+function resolveDottedHandler(sf: SourceFile, name: string): Node[] {
+  const dot = name.indexOf('.')
+  const objectName = name.slice(0, dot)
+  const propName = name.slice(dot + 1)
+  if (propName.includes('.')) return []
+
+  const decl = sf.getVariableDeclaration(objectName)
+  if (!decl) return []
+
+  const out: Node[] = []
+  const seen = new Set<string>()
+  for (const obj of objectSourcesOf(decl)) {
+    const prop = obj.getProperty(propName)
+    if (!prop) continue
+    for (const fn of propertyFunctions(prop)) {
+      const key = keyOf(fn)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(fn)
+    }
+  }
+  return out
+}
+
+/**
+ * 一個變數宣告可能持有的所有物件字面量。
+ *
+ * `computed(() => { if (…) return {…} else return {…} })` 會拿到兩個——分支條件
+ * 寫在同一個檔案裡，敘述有能力講清楚走哪邊，這跟 interface 多實作那種真的不可知
+ * 的候選不同。
+ */
+function objectSourcesOf(decl: Node): ObjectLiteralExpression[] {
+  const init = Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined
+  if (!init) return []
+  const literal = objectLiteralsIn(init)
+  if (literal.length > 0) return literal
+  if (!Node.isCallExpression(init)) return []
+
+  const callee = init.getExpression()
+  if (Node.isIdentifier(callee) && OBJECT_WRAPPERS.has(callee.getText())) {
+    const arg = init.getArguments()[0]
+    if (!arg) return []
+    const direct = objectLiteralsIn(arg)
+    return direct.length > 0 ? direct : returnedObjectLiterals(arg)
+  }
+
+  // composable 呼叫：追進去拿它回傳的物件
+  const out: ObjectLiteralExpression[] = []
+  for (const def of resolveCallTarget(init)) {
+    const fn = toFunctionLike(def)
+    if (fn) out.push(...returnedObjectLiterals(fn))
+  }
+  return out
+}
+
+/** 函式回傳的物件字面量。`() => ({…})` 的簡寫體與 `return {…}` 都要收。 */
+function returnedObjectLiterals(fn: Node): ObjectLiteralExpression[] {
+  const body =
+    Node.isFunctionDeclaration(fn) || Node.isArrowFunction(fn) || Node.isFunctionExpression(fn)
+      ? fn.getBody()
+      : undefined
+  if (!body) return []
+
+  const direct = objectLiteralsIn(body)
+  if (direct.length > 0) return direct
+
+  const out: ObjectLiteralExpression[] = []
+  for (const ret of body.getDescendantsOfKind(SyntaxKind.ReturnStatement)) {
+    const expr = ret.getExpression()
+    if (expr) out.push(...objectLiteralsIn(expr))
+  }
+  return out
+}
+
+/**
+ * 一個運算式裡的物件字面量。
+ *
+ * `return cond ? {…} : {…}` 與 `if/else` 各 return 一個是同一件事的兩種寫法，
+ * 兩邊都要收——只收 if/else 那種的話，三元寫法的檔案會安靜地少掉一半候選。
+ */
+function objectLiteralsIn(expr: Node, depth = 0): ObjectLiteralExpression[] {
+  if (depth > 3) return []
+  if (Node.isObjectLiteralExpression(expr)) return [expr]
+  if (Node.isParenthesizedExpression(expr)) return objectLiteralsIn(expr.getExpression(), depth + 1)
+  // 分支回傳的是另一個常數：`cond ? editModelInfo : createModelInfo`
+  if (Node.isIdentifier(expr)) {
+    const out: ObjectLiteralExpression[] = []
+    for (const def of expr.getDefinitionNodes()) {
+      if (!Node.isVariableDeclaration(def)) continue
+      const init = def.getInitializer()
+      if (init) out.push(...objectLiteralsIn(init, depth + 1))
+    }
+    return out
+  }
+  if (Node.isConditionalExpression(expr)) {
+    return [
+      ...objectLiteralsIn(expr.getWhenTrue(), depth + 1),
+      ...objectLiteralsIn(expr.getWhenFalse(), depth + 1)
+    ]
+  }
+  // `cond && {…}`、`obj ?? {…}`——兩側都可能是實際生效的那個
+  if (Node.isBinaryExpression(expr)) {
+    const op = expr.getOperatorToken().getKind()
+    if (
+      op === SyntaxKind.AmpersandAmpersandToken ||
+      op === SyntaxKind.BarBarToken ||
+      op === SyntaxKind.QuestionQuestionToken
+    ) {
+      return [...objectLiteralsIn(expr.getLeft(), depth + 1), ...objectLiteralsIn(expr.getRight(), depth + 1)]
+    }
+  }
+  return []
+}
+
+/**
+ * 屬性值 → 函式節點。
+ *
+ * `okFn: () => …` 由 toFunctionLike 直接處理；`okFn: updateHandler` 的值是識別字，
+ * 而 toFunctionLike 刻意不跟識別字（跟了會改變它在別處的行為），所以這裡自己用
+ * Type Checker 跳過去。
+ */
+function propertyFunctions(prop: Node): Node[] {
+  const direct = toFunctionLike(prop)
+  if (direct) return [direct]
+
+  const init = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined
+  if (!init || !Node.isIdentifier(init)) return []
+
+  const out: Node[] = []
+  for (const def of init.getDefinitionNodes()) {
+    const fn = toFunctionLike(def)
+    if (fn) out.push(fn)
+  }
+  return out
+}
+
+/**
+ * 多候選 handler 的合成根節點：N 棵子樹全掛上，不挑一個當答案。
+ *
+ * 根節點本身沒有 endLine——它不對應任何一段原始碼，只是「這裡分岔」的標記，
+ * 封包會把它渲染成 ⟨N 個實作候選⟩。
+ */
+function candidateRoot(
+  t: Tracer,
+  fns: Node[],
+  name: string,
+  loc: SourceLoc,
+  depth: number,
+  state: DfsState,
+  opts: TraceOptions,
+  guardedCtx: boolean
+): ChainNode {
+  const root: ChainNode = {
+    name,
+    loc,
+    effects: [],
+    children: [],
+    candidates: fns.map(fn => t.locOf(fn))
+  }
+  if (fns.length > opts.maxCandidates) {
+    state.shared.candidatesTruncated += fns.length - opts.maxCandidates
+  }
+  for (const fn of fns.slice(0, opts.maxCandidates)) {
+    if (depth + 1 >= opts.maxDepth || state.nodeBudget <= 0) break
+    const key = keyOf(fn)
+    if (state.visited.has(key) || state.expanded.has(key)) continue
+    state.visited.add(key)
+    state.expanded.add(key)
+    state.nodeBudget--
+    root.children.push(dfs(t, fn, depth + 1, state, opts, guardedCtx))
+    state.visited.delete(key)
+  }
+  return root
+}
+
+/**
  * `const { login } = useLoginForm(…)` → 找出 composable 回傳物件裡的 `login`。
  *
  * 不用 `getDefinitionNodes()`：對解構綁定它只回到綁定本身，拿不到實作。
@@ -267,9 +469,12 @@ function joinEmit(
 
   const links: AsyncLink[] = []
   for (const edge of edges.slice(0, opts.maxListeners)) {
-    const fn = resolveNamedHandler(t, edge.from, edge.handlerName)
+    const fns = resolveHandlerCandidates(t, edge.from, edge.handlerName)
+    const fn = fns.length === 1 ? fns[0]! : null
     let chain: ChainNode | null = null
-    if (fn && depth < opts.maxDepth && state.nodeBudget > 0) {
+    if (fns.length > 1) {
+      chain = candidateRoot(t, fns, edge.handlerName!, edge.loc, depth, state, opts, guardedCtx)
+    } else if (fn && depth < opts.maxDepth && state.nodeBudget > 0) {
       const key = keyOf(fn)
       if (!state.visited.has(key) && !state.expanded.has(key)) {
         state.visited.add(key)
@@ -436,22 +641,25 @@ function dfs(
  * 解析 entry 的起始函式。
  * - LIFECYCLE：靠行號對齊直接在虛擬檔找到該行的 `onMounted(...)`，取其函式引數
  * - UI_EVENT：以 handler 名稱在該 SFC 的頂層作用域查找
+ *
+ * 回陣列：`@ok="modalInfo.okFn"` 這種綁到物件屬性的 handler 可能有多個實作分支。
  */
-function resolveEntryFunction(t: Tracer, entry: EntryCandidate): Node | null {
+function resolveEntryFunctions(t: Tracer, entry: EntryCandidate): Node[] {
   const sf = sourceFileFor(t, entry.file)
-  if (!sf) return null
+  if (!sf) return []
 
   if (entry.kind === 'LIFECYCLE') {
     for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       if (call.getStartLineNumber() !== entry.loc.line) continue
       if (call.getExpression().getText() !== entry.trigger) continue
       const arg = call.getArguments()[0]
-      return arg ? toFunctionLike(arg) : null
+      const fn = arg ? toFunctionLike(arg) : null
+      return fn ? [fn] : []
     }
-    return null
+    return []
   }
 
-  return resolveNamedHandler(t, entry.file, entry.handlerName)
+  return resolveHandlerCandidates(t, entry.file, entry.handlerName)
 }
 
 function flatten(
@@ -637,8 +845,13 @@ export function traceEntries(
     let root: ChainNode | null = null
     const state = newDfsState(opts, shared)
 
-    const fn = resolveEntryFunction(t, entry)
-    if (fn) {
+    const fns = resolveEntryFunctions(t, entry)
+    const fn = fns.length === 1 ? fns[0]! : null
+    if (fns.length > 1) {
+      // 多候選的觸發點：合成根節點掛住 N 棵子樹。不能挑一個——`modalInfo.okFn`
+      // 在新增／編輯兩個分支各指一個函式，挑一個就等於刪掉另一半流程
+      root = candidateRoot(t, fns, entry.handlerName!, entry.loc, 0, state, opts, false)
+    } else if (fn) {
       state.visited.add(keyOf(fn))
       state.expanded.add(keyOf(fn))
       root = dfs(t, fn, 0, state, opts, false)

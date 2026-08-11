@@ -270,6 +270,10 @@ export function callsWithin(fn: Node): CallExpression[] {
     if (Node.isCallExpression(node)) out.push(node)
     node.forEachChild(visit)
   }
-  body.forEachChild(visit)
+  // 表達式主體的箭頭函式（`() => loadDemo()`）的 body 就是那個呼叫本身。
+  // 只走 forEachChild 的話它永遠不會被當成節點看到，整個呼叫被靜默吞掉——
+  // 而這種寫法正是「屬性上的 handler」與推播 callback 的大宗。
+  if (Node.isBlock(body)) body.forEachChild(visit)
+  else visit(body)
   return out
 }
