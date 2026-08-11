@@ -38,6 +38,25 @@ export interface AnalyzerConfig {
     unwrapReturn?: boolean
     label: string
   }[]
+  /**
+   * 推播訂閱點：`<接收者>.<方法>('事件名', handler)` 的形狀就是一條流程的起點。
+   *
+   * **預設空陣列——沒列就完全不做。**這是刻意的：`.on('ready', …)` 這個語法形狀
+   * 在任何專案裡都同時屬於推播連線與 UI 元件（wavesurfer、tinymce 編輯器），
+   * 沒有辨識依據就硬接，只會把播放器的內部事件寫成業務流程。
+   *
+   * - `receiverPattern`：接收者運算式的正則（大小寫不敏感、子字串比對）。
+   *   `machineConnection.value` 與 `signalR` 都要命中，`wavesurfer` 不能命中
+   * - `methods`：註冊方法名。SignalR 直接用 `on`，包一層的 composable 常叫 `subscribe`
+   *
+   * 事件名不是字串常數的（轉發層 `conn.on(eventName, cb)`）一律略過並計數——
+   * 猜事件名會產生假的流程起點。
+   */
+  push: {
+    receiverPattern: string
+    methods: string[]
+    label: string
+  }[]
   /** 掃描時排除的 glob（相對 repo 根） */
   exclude: string[]
 }
@@ -95,6 +114,8 @@ export function defaultVueConfig(repoRoot: string): AnalyzerConfig {
     routerDir: 'src/router',
     aliases: { '@/': 'src/' },
     crosscut: [],
+    // 空的：推播庫與命名慣例是每個專案自己的事，猜錯會憑空生出流程
+    push: [],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

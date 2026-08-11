@@ -2,12 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { glob } from 'tinyglobby'
 import type { AnalyzerConfig } from './config.js'
-import { disambiguate, domainOf, scanSfc, type DetectContext } from './entry/detect.js'
+import { disambiguate, domainOf, pushEntries, scanSfc, type DetectContext } from './entry/detect.js'
 import { extractRoutes } from './entry/routes.js'
 import { parseGlobalComponents } from './load/registry.js'
 import { resolveSpecifier, resolveToFile } from './load/resolve.js'
 import { parseSfc, type ParsedSfc } from './load/sfc.js'
-import { extractScriptFacts, type ScriptFacts } from './load/script.js'
+import { compilePushMatchers, extractScriptFacts, type ScriptFacts } from './load/script.js'
 import type { EntryCandidate, EntryScanResult, ListenerEdge } from './types.js'
 
 export interface Workspace {
@@ -35,6 +35,7 @@ export async function loadWorkspace(config: AnalyzerConfig): Promise<Workspace> 
   const sfcs = new Map<string, ParsedSfc>()
   const facts = new Map<string, ScriptFacts>()
   const tsFiles: string[] = []
+  const pushMatchers = compilePushMatchers(config.push)
 
   for (const rel of files) {
     const abs = path.join(config.repoRoot, rel)
@@ -42,10 +43,10 @@ export async function loadWorkspace(config: AnalyzerConfig): Promise<Workspace> 
     if (rel.endsWith('.vue')) {
       const sfc = parseSfc(rel, source)
       sfcs.set(rel, sfc)
-      if (sfc.virtualTs) facts.set(rel, extractScriptFacts(`${rel}.ts`, sfc.virtualTs))
+      if (sfc.virtualTs) facts.set(rel, extractScriptFacts(`${rel}.ts`, sfc.virtualTs, pushMatchers))
     } else {
       tsFiles.push(rel)
-      facts.set(rel, extractScriptFacts(rel, source))
+      facts.set(rel, extractScriptFacts(rel, source, pushMatchers))
     }
   }
 
@@ -77,7 +78,9 @@ export async function loadWorkspace(config: AnalyzerConfig): Promise<Workspace> 
 const EMPTY_FACTS: ScriptFacts = {
   componentImports: new Map(),
   declaredNames: new Set(),
-  lifecycle: []
+  lifecycle: [],
+  push: [],
+  pushDynamicEvents: 0
 }
 
 export function scanEntries(ws: Workspace): EntryScanResult {
@@ -101,6 +104,13 @@ export function scanEntries(ws: Workspace): EntryScanResult {
     listeners.push(...scan.listeners)
     dynamicEventBindings += scan.dynamicEventBindings
     unresolvedComponentTags += scan.unresolvedComponentTags
+  }
+
+  // `.ts` 檔的推播訂閱：store 與 composable 裡也會訂閱（例如 token 續期的
+  // `CheckRefreshToken`），只掃 SFC 會漏掉整組與畫面無關的推播流程
+  for (const rel of ws.tsFiles) {
+    const facts = ws.facts.get(rel)
+    if (facts && facts.push.length > 0) entries.push(...pushEntries(rel, facts))
   }
 
   const routeFiles = ws.tsFiles.filter(f => f.startsWith(`${ws.config.routerDir}/`))
@@ -142,6 +152,8 @@ export function scanEntries(ws: Workspace): EntryScanResult {
       globalComponents: ws.globalComponents.size,
       dynamicEventBindings,
       unresolvedComponentTags,
+      pushSubscriptions: entries.filter(e => e.kind === 'SYSTEM_PUSH').length,
+      pushDynamicEvents: [...ws.facts.values()].reduce((n, f) => n + f.pushDynamicEvents, 0),
       elapsedMs: Date.now() - started
     }
   }
