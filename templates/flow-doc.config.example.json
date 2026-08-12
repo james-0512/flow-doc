@@ -28,6 +28,15 @@
     { "file": "src/utils/service/api.service.ts", "label": "API 請求／回應攔截器" }
   ],
 
+  "_push": "推播訂閱點：`<接收者>.<方法>('事件名', handler)` 是一條流程的起點（後端推播，前面沒有使用者動作）。預設空陣列＝完全不做，這是刻意的——同樣的語法形狀在 wavesurfer、tinymce 上是 UI 內部事件，接進來只會是噪音。receiverPattern 是大小寫不敏感的子字串正則，要能命中 `machineConnection.value` 與 `signalR`、不命中 `wavesurfer`。事件名不是字串常數的（轉發層 `conn.on(eventName, cb)`）一律略過並計數。",
+  "push": [
+    {
+      "receiverPattern": "(connection|conn|hub|signalR)",
+      "methods": ["on", "subscribe"],
+      "label": "SignalR 推播"
+    }
+  ],
+
   "_exclude": "掃描時排除的 glob。各專案的報告產出目錄不同，記得補。",
   "exclude": ["**/node_modules/**", "**/dist/**", "**/*.spec.ts", "**/*.test.ts", "**/*.d.ts"]
 }

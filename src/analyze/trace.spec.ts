@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { loadConfig } from '../config.js'
+import { groupByHandler } from '../pack.js'
 import { loadWorkspace, scanEntries } from '../workspace.js'
 import type { ChainNode, EntryScanResult, FlowChain, TraceResult } from '../types.js'
 import { traceEntries } from './trace.js'
@@ -140,6 +141,36 @@ describe('call chain 追蹤（fixture）', () => {
         'src/views/Demo/DemoModal.vue#UtilButton.dblclick@modalInfo.cancelFn',
         'src/views/Demo/DemoModal.vue#UtilButton.focus@ternaryInfo.okFn'
       ])
+    })
+  })
+
+  describe('推播訂閱（`signalR.subscribe("X", handler)`）', () => {
+    it('是獨立的流程起點，事件名進 ID', () => {
+      const entry = scan.entries.find(e => e.kind === 'SYSTEM_PUSH')
+      expect(entry?.id).toBe('src/views/Demo/PushView.vue#push.DemoUpdated@refreshHandler')
+      expect(entry?.trigger).toBe('DemoUpdated')
+      expect(entry?.domain).toBe('Demo')
+    })
+
+    it('callback 就是鏈的起點，不需要跨檔 join', () => {
+      const chain = chainOf('PushView.vue#push.DemoUpdated')
+      expect(chain.entryKind).toBe('SYSTEM_PUSH')
+      expect(chain.flowKind).toBe('read')
+      expect(names(chain.root!)).toEqual(expect.arrayContaining(['refreshHandler', 'loadDemo']))
+    })
+
+    it('事件名是變數的轉發層不算起點，但要計數', () => {
+      expect(scan.entries.some(e => e.file.endsWith('useSignalR.ts'))).toBe(false)
+      expect(scan.stats.pushDynamicEvents).toBeGreaterThan(0)
+      expect(scan.stats.pushSubscriptions).toBe(1)
+    })
+
+    it('handler 與按鈕相同也不併章——業務事實不同', () => {
+      const push = chainOf('PushView.vue#push.DemoUpdated')
+      const click = chainOf('PushView.vue#button.click')
+      // 兩條鏈的根函式是同一個 refreshHandler
+      expect(push.root!.loc.line).toBe(click.root!.loc.line)
+      expect(groupByHandler([push, click]).size).toBe(2)
     })
   })
 

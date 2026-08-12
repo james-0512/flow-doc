@@ -98,6 +98,34 @@ export function semanticId(rel: string, tag: string, event: string, handlerName?
 }
 
 /**
+ * 推播訂閱點 → entry 候選。SFC 與 `.ts` 檔（store／composable 裡也會訂閱）共用。
+ *
+ * ID 形狀沿用語意錨點慣例 `檔案#push.事件@handler`，一樣不含行號：訂閱點在檔案裡
+ * 上下移動不該讓它變成一條新流程。
+ */
+export function pushEntries(rel: string, facts: ScriptFacts): EntryCandidate[] {
+  const domain = domainOf(rel)
+  const entries = facts.push.map(sub => {
+    const handlerName = extractHandlerName(sub.handlerExpr)
+    return {
+      id: handlerName
+        ? `${rel}#push.${sub.event}@${handlerName}`
+        : `${rel}#push.${sub.event}`,
+      kind: 'SYSTEM_PUSH' as const,
+      domain,
+      label: `${rel} 收到推播 ${sub.event}（${sub.label}）`,
+      loc: { file: rel, line: sub.line },
+      trigger: sub.event,
+      handlerExpr: sub.handlerExpr,
+      handlerName,
+      file: rel
+    }
+  })
+  disambiguate(entries)
+  return entries
+}
+
+/**
  * 同檔內撞名的 ID 依文件順序加上 `~2`、`~3`。
  *
  * 撞名代表同檔有標籤、事件、handler 全同的兩個觸發點（例如 `v-for` 展開前的模板、
@@ -117,6 +145,8 @@ export function disambiguate(entries: EntryCandidate[]): void {
 export function scanSfc(ctx: DetectContext, sfc: ParsedSfc, facts: ScriptFacts): SfcScan {
   const scan: SfcScan = { entries: [], listeners: [], dynamicEventBindings: 0, unresolvedComponentTags: 0 }
   const domain = domainOf(sfc.rel)
+
+  scan.entries.push(...pushEntries(sfc.rel, facts))
 
   for (const hook of facts.lifecycle) {
     scan.entries.push({

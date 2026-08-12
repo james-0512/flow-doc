@@ -167,6 +167,16 @@ export function packFlow(
   md.push(`- 分類：${chain.flowKind === 'write' ? '**寫入型流程**（會改變資料）' : chain.flowKind === 'read' ? '查詢型流程（只讀後端）' : '純 UI 操作（未碰後端）'}`)
   md.push(`- 業務域：\`${chain.domain}\``)
   md.push(`- 觸發點：\`${chain.entryLoc.file}:${chain.entryLoc.line}\``)
+  if (chain.entryKind === 'SYSTEM_PUSH') {
+    // 講白，不要讓寫手從標題推。少了這行，敘述會被寫成「使用者點了什麼」——
+    // 而這一章的重點正是「不需要使用者做任何事」
+    md.push(
+      `- 觸發方式：**後端推播** \`${chain.trigger}\`。handler 由後端主動觸發，` +
+        `前面沒有使用者動作，使用者甚至不需要在這一頁。` +
+        `**後端在什麼條件下送出這個事件不在本封包內**（那是後端的行為），` +
+        `訂閱點那一行的原始碼也沒有嵌進來——兩者都要寫進「未追蹤的部分」，不要從事件名推論。`
+    )
+  }
   if (siblings.length > 0) {
     md.push(
       `- **另有 ${siblings.length} 個觸發點走同一條程式碼路徑**，敘述只需寫一次，` +
@@ -337,7 +347,11 @@ export function groupByHandler(chains: FlowChain[]): Map<FlowChain, FlowChain[]>
   const buckets = new Map<string, FlowChain[]>()
   for (const c of chains) {
     if (!c.root) continue
-    const key = `${c.root.loc.file}:${c.root.loc.line}`
+    // 推播不與使用者觸發併章，即使 handler 是同一個。「使用者按刷新」與
+    // 「後端推播 Refresh」走同一條程式碼路徑，但業務事實不同——併進去的話，
+    // 「不需使用者動作也會更新」這件事在手冊裡就查不到了
+    const scope = c.entryKind === 'SYSTEM_PUSH' ? 'push:' : ''
+    const key = `${scope}${c.root.loc.file}:${c.root.loc.line}`
     const bucket = buckets.get(key)
     if (bucket) bucket.push(c)
     else buckets.set(key, [c])

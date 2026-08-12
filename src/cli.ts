@@ -54,6 +54,8 @@ function printSummary(result: EntryScanResult, topDomains: number): void {
   console.log(`\n已知缺口：`)
   console.log(`  動態事件名（@[evt] / v-on="obj"）  ${stats.dynamicEventBindings}  ← 無法靜態判定，需人工確認`)
   console.log(`  標籤解析不到檔案的元件            ${stats.unresolvedComponentTags}  ← 第三方或動態元件`)
+  console.log(`  推播訂閱（config.push）           ${stats.pushSubscriptions}  ← 沒設定就是 0，不是沒有推播`)
+  console.log(`  推播事件名是變數而略過            ${stats.pushDynamicEvents}  ← 多為包一層的轉發函式`)
 }
 
 function printTraceSummary(result: TraceResult): void {
