@@ -15,6 +15,7 @@ import {
   type PendingEntry
 } from './loop.js'
 import type { FlowChain, TraceResult } from './types.js'
+import { packageVersion, REPRESENTATION_VERSION } from './version.js'
 
 function chain(entryId: string): FlowChain {
   return { entryId } as FlowChain
@@ -24,7 +25,9 @@ function trace(commit: string | null, ids: string[] = ['a', 'b'], dirty = false)
   return {
     repoRoot: '/repo',
     generatedAt: '2026-07-31T00:00:00.000Z',
-    analyzer: { representation: 4, version: '0.1.0' },
+    // 取真實值：早退判準會比對「baseline 記的分析器身分」與現在這一版，
+    // 寫死的話這裡永遠不相等，早退路徑就測不到了
+    analyzer: { representation: REPRESENTATION_VERSION, version: packageVersion() },
     target: { commit, dirty },
     chains: ids.map(chain),
     crosscut: [],
@@ -157,6 +160,47 @@ describe('runLoop 防呆與早退', () => {
     // 補寫成功 → 佇列清空
     expect(r.pending).toEqual([])
     expect(r.llmUsed).toBe(true)
+  })
+
+  it('commit 沒動、佇列也空，但分析器換版 → 不早退，照樣 trace', async () => {
+    // 只看 commit 的話，分析器升級剛好碰上佇列清空就完全隱形：不 trace、不 diff、
+    // 不重生封包，使用者只看到「目標 repo 沒動，這輪直接退出」
+    const { steps, calls } = fakeSteps({
+      targetRevision: () => ({ commit: 'aaa', dirty: false }),
+      readBaseline: () => ({
+        ...trace('aaa'),
+        analyzer: { representation: REPRESENTATION_VERSION, version: '0.0.1-舊版' }
+      }),
+      trace: async () => trace('aaa')
+    })
+    const r = await runLoop(steps, defaults)
+    expect(r.outcome).not.toBe('early-exit')
+    expect(calls).toContain('trace')
+  })
+
+  it('commit 沒動但分析器產出新流程 → 仍要重生封包與 baseline', async () => {
+    // 分析器升級的輪次：目標 repo 一行都沒改，但新規則多追出流程。不重生封包的話，
+    // narrate 會對每一條新流程回報「找不到封包」——可修的原因被寫成待人工的欠帳，
+    // 而且下一輪會原封不動重演
+    const { steps, calls } = fakeSteps({
+      targetRevision: () => ({ commit: 'aaa', dirty: false }),
+      readBaseline: () => ({
+        ...trace('aaa'),
+        analyzer: { representation: REPRESENTATION_VERSION, version: '0.0.1-舊版' }
+      }),
+      trace: async () => trace('aaa'),
+      diff: () =>
+        diffResult({
+          reason: '分析器擴充：新增 30 條',
+          current: { commit: 'aaa', representation: 4, generatedAt: '', dirty: false },
+          counts: { unchanged: 1900, moved: 0, changed: 0, added: 30, removed: 0 },
+          work: { reanchor: [], rewrite: ['a'], archive: [] }
+        })
+    })
+    const r = await runLoop(steps, defaults)
+    expect(r.outcome).toBe('completed')
+    expect(calls).toContain('pack')
+    expect(calls).toContain('writeBaseline')
   })
 
   it('關掉 narrate 時，佇列的欠帳不構成「照跑」的理由', async () => {

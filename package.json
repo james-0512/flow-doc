@@ -1,6 +1,6 @@
 {
   "name": "flow-doc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "從 TS/Vue 程式碼庫追蹤業務流程執行路徑，產出流程手冊",

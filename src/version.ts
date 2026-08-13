@@ -14,6 +14,12 @@ import { fileURLToPath } from 'node:url'
  * 沒有；後者每個 commit 都變，連改個錯字都會觸發全量重生。這個常數是刻意的
  * 人為宣告——**它變了，就代表舊 baseline 不能拿來 diff**。
  *
+ * **跟 package.json 的版本分工**：分析器只要改到輸出就 bump package.json，
+ * 閉環用它判斷「同一個 commit 要不要重跑」（`loop.ts` 的早退判準）；只有在
+ * 「舊 baseline 逐條比對會得到滿江紅」時才動這個常數。純增量的擴充兩者不同——
+ * 實測加上點號 handler 與推播偵測後，舊 baseline 比得動且結果正確
+ * （1932 沒變、11 改、30 新增），那種情況 bump 這裡只會讓閉環白卡一輪。
+ *
  * 版本紀錄：
  * - 1：初版。entry ID 為 `檔案:行號:標籤:事件`
  * - 2：entry ID 改為語意錨點（不含行號），新增 legacyEntryId 供一次性遷移
