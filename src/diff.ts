@@ -1,4 +1,5 @@
 import { hasManual, type ManualIndex } from './manuals.js'
+import { packetCoverage } from './pack.js'
 import { lineSignature, structureSignature } from './signature.js'
 import type { FlowChain, TraceResult } from './types.js'
 
@@ -41,6 +42,13 @@ export interface DiffResult {
     /** 流程消失 → 手冊歸檔下架 */
     archive: string[]
   }
+  /**
+   * 現況的封包覆蓋表（`entryId` → 代表的 `entryId`），取自 `packetCoverage`。
+   *
+   * 給呼叫端收斂待人工佇列用：不在表裡的條目沒有封包，narrate 對它做不了事，
+   * 留在佇列裡只會變成永遠還不掉的假欠帳。
+   */
+  coverage: Map<string, string>
 }
 
 export interface DiffOptions {
@@ -104,13 +112,17 @@ export function diffFlows(
       dirty: current.target?.dirty ?? false
     }
   }
+  // 升版圈與熔斷那些提早 return 的路徑也帶著覆蓋表：呼叫端就不必先判斷
+  // 「這個 verdict 有沒有附覆蓋表」才敢用，少一個會忘記的分支
+  const coverage = packetCoverage(current)
   const empty: DiffResult = {
     verdict: 'proceed',
     reason: '',
     ...meta,
     counts: { unchanged: 0, moved: 0, changed: 0, added: 0, removed: 0 },
     changes: [],
-    work: { reanchor: [], rewrite: [], archive: [] }
+    work: { reanchor: [], rewrite: [], archive: [] },
+    coverage
   }
 
   // 表示法變了就不比了——舊 baseline 是用不同規則產生的，逐條比對只會得到滿江紅
@@ -180,11 +192,27 @@ export function diffFlows(
   // 「這個域有人在維護」＝該域至少有一條流程寫了敘述
   const maintainedDomains = new Set(changes.filter(c => c.hasManual).map(c => c.domain))
 
+  /**
+   * 重寫清單要以**封包**為單位，不是以觸發點為單位。兩件事都靠這一步收斂：
+   *
+   * - 非流程（純查詢／關 modal 這類 `isFlow: false`）沒有封包，本來就不該進手冊；
+   * - 同一個 handler 的多個觸發點只有代表有封包，敘述由代表那一章涵蓋
+   *   （`groupByHandler`）。摺疊到代表，順帶去重。
+   *
+   * 少了這一步，narrate 會拿著沒有封包的 entryId 空轉，而且熔斷器的章數會被
+   * 灌水——實測 37 章裡有 15 章根本產不出來。
+   */
+  const rewrite = [
+    ...new Set(
+      changes
+        .filter(c => (c.kind === 'changed' && c.hasManual) || (c.kind === 'added' && maintainedDomains.has(c.domain)))
+        .map(c => coverage.get(c.entryId))
+        .filter((id): id is string => id !== undefined)
+    )
+  ]
   const work = {
     reanchor: changes.filter(c => c.kind === 'moved' && c.hasManual).map(c => c.entryId),
-    rewrite: changes
-      .filter(c => (c.kind === 'changed' && c.hasManual) || (c.kind === 'added' && maintainedDomains.has(c.domain)))
-      .map(c => c.entryId),
+    rewrite,
     archive: changes.filter(c => c.kind === 'removed' && c.hasManual).map(c => c.entryId)
   }
 

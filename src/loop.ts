@@ -248,14 +248,23 @@ export async function runLoop(steps: LoopSteps, options: LoopOptions): Promise<L
       return { ...filled, outcome: 'needs-human', exitCode: 2, reason: d.reason }
     }
 
-    // 流程已消失的佇列條目沒有意義了；verify-failed 以檔案為單位，存續交給 verify 判斷
-    const currentIds = new Set([...current.chains, ...current.crosscut].map(c => c.entryId))
-    const pendingAlive = pendingPrev.filter(p => p.reason === 'verify-failed' || currentIds.has(p.id))
+    // 佇列條目的存續看**封包**，不看流程是否還在：流程消失了固然做不了事，流程還在
+    // 但沒有封包（非流程、或被併進代表）同樣做不了事——narrate 只會再回報一次
+    // 「找不到封包」，然後原封不動退回佇列。這種條目不清掉就會變成永遠還不掉的假欠帳。
+    // verify-failed 以檔案為單位，存續交給 verify 判斷，不走這條。
+    const pendingAlive = pendingPrev.filter(p => p.reason === 'verify-failed' || d.coverage.has(p.id))
+    const dropped = pendingPrev.length - pendingAlive.length
+    // 清掉的要講出來。佇列筆數自己變少而沒有交代的話，看起來像敘述被偷偷寫完了
+    if (dropped > 0) steps.log(`佇列清掉 ${dropped} 筆（流程已消失或沒有對應封包，narrate 做不了事）`)
 
-    // 本輪要寫的章節 ＝ diff 說要重寫的 ∪ 佇列裡欠的
+    // 本輪要寫的章節 ＝ diff 說要重寫的 ∪ 佇列裡欠的。
+    // 佇列的 ID 一樣要摺疊到代表，否則舊佇列裡的觸發點會繞過 diff 那層收斂
     const targets = [
-      ...new Set([...d.work.rewrite, ...pendingAlive.filter(p => p.reason !== 'verify-failed').map(p => p.id)])
-    ].filter(id => currentIds.has(id))
+      ...new Set([
+        ...d.work.rewrite,
+        ...pendingAlive.filter(p => p.reason !== 'verify-failed').map(p => d.coverage.get(p.id)!)
+      ])
+    ]
 
     if (options.dryRun) {
       return {
@@ -314,7 +323,7 @@ export async function runLoop(steps: LoopSteps, options: LoopOptions): Promise<L
     const failures = verifySet.length > 0 ? steps.verify(verifySet, current) : []
 
     const now = new Date().toISOString()
-    const pendingNext = nextPending(pendingAlive, narrated, failures, verifySet, now)
+    const pendingNext = nextPending(pendingAlive, narrated, failures, verifySet, now, d.coverage)
 
     const llmUsed = narrated != null && narrated.usage.output > 0
     // 自動合併只留給「與人審輪次無關的機械輪」：無 LLM 產出、沒有流程消失、
@@ -366,7 +375,9 @@ function nextPending(
   narrated: NarrateSummary | null,
   failures: VerifyFailure[],
   verified: string[],
-  now: string
+  now: string,
+  /** entryId → 代表。佇列的觸發點是靠代表那一章結清的，比對前要先摺疊 */
+  coverage: Map<string, string>
 ): PendingEntry[] {
   const writtenIds = new Set(narrated?.written.map(w => w.entryId) ?? [])
   const failedFiles = new Set(failures.map(f => f.file))
@@ -398,7 +409,8 @@ function nextPending(
       if (verifiedFiles.has(p.id) && !failedFiles.has(p.id)) continue
       push(p)
     } else {
-      if (writtenIds.has(p.id)) continue
+      // 寫成的是代表那一章，欠帳掛在觸發點上——不摺疊的話那筆會永遠結不掉
+      if (writtenIds.has(coverage.get(p.id) ?? p.id)) continue
       push(p)
     }
   }
