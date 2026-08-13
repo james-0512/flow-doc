@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import type { DiffResult } from './diff.js'
 import type { TraceResult } from './types.js'
-import type { TargetRevision } from './version.js'
+import { packageVersion, REPRESENTATION_VERSION, type TargetRevision } from './version.js'
 
 /**
  * 閉環一圈的狀態機。
@@ -173,7 +173,21 @@ export async function runLoop(steps: LoopSteps, options: LoopOptions): Promise<L
 
     // 佇列裡還有可重試的章節時不早退：commit 沒動也要把欠的敘述補完
     const retryable = options.narrate ? pendingPrev.filter(p => p.reason !== 'verify-failed') : []
-    if (rev.commit !== null && rev.commit === baselineCommit && !rev.dirty && retryable.length === 0) {
+    // 分析器換了就不能早退——同一個 commit 用新規則會跑出不同的鏈。
+    // 只看 commit 的話，分析器升級在佇列剛好清空的那一輪會完全隱形：不 trace、
+    // 不 diff、不重生封包，而使用者只會看到「目標 repo 沒動，這輪直接退出」。
+    // 身分取自 baseline 自己記的 analyzer 欄位，所以**改了分析器就要 bump
+    // package.json 的版本**，否則這裡分不出來。
+    const sameAnalyzer =
+      baseline.analyzer?.representation === REPRESENTATION_VERSION &&
+      baseline.analyzer?.version === packageVersion()
+    if (
+      rev.commit !== null &&
+      rev.commit === baselineCommit &&
+      !rev.dirty &&
+      retryable.length === 0 &&
+      sameAnalyzer
+    ) {
       return {
         ...EMPTY_REPORT,
         outcome: 'early-exit',
@@ -253,8 +267,16 @@ export async function runLoop(steps: LoopSteps, options: LoopOptions): Promise<L
       }
     }
 
-    // commit 沒前進的輪次（純補佇列）不重寫 baseline 與封包——內容不變，只會製造雜訊 diff
-    const advance = rev.commit === null || rev.commit !== baselineCommit
+    // commit 沒前進的輪次（純補佇列）不重寫 baseline 與封包——內容不變，只會製造雜訊 diff。
+    //
+    // 但「commit 沒前進 ⇒ 內容不變」這個前提**只在分析器沒變時成立**。分析器擴充後，
+    // 同一個 commit 也會跑出新的鏈——實測加上點號 handler 解析之後，同一個 commit
+    // 多出 30 條流程，而封包沒重生就讓 narrate 全部卡在「找不到封包」，37 章一章都
+    // 寫不出來，還把可修的原因寫成待人工的欠帳。所以判準改成看 diff 的實際內容：
+    // 有任何一條 added／changed／removed／moved，就代表這一輪的產出與 baseline 不同。
+    const contentChanged =
+      d.counts.added + d.counts.changed + d.counts.removed + d.counts.moved > 0
+    const advance = rev.commit === null || rev.commit !== baselineCommit || contentChanged
     if (advance) {
       const packed = steps.pack(current)
       steps.log(`封包重生 ${packed.packets} 份`)
