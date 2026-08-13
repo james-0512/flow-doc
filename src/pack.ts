@@ -442,15 +442,59 @@ export interface PackRunSummary {
   limitationsFound: boolean
 }
 
+/** 這一輪會產出哪些封包。`writePackets` 與 `packetCoverage` 都走這裡，兩者才不會分岔。 */
+export type PackSelectOptions = Pick<PackRunOptions, 'all' | 'domain' | 'flow' | 'perTrigger'>
+
+export interface PacketSelection {
+  /** 代表 → 被它併掉的其他觸發點。只有代表會有封包檔 */
+  groups: Map<FlowChain, FlowChain[]>
+  crosscut: FlowChain[]
+  /** 通過過濾的流程總數（含被併掉的觸發點） */
+  chainsCovered: number
+}
+
+/** 挑出這輪要出封包的流程。過濾規則只寫在這裡一份。 */
+export function selectPackets(result: TraceResult, options: PackSelectOptions = {}): PacketSelection {
+  let chains = result.chains.filter(c => c.root != null)
+  if (!options.all) chains = chains.filter(c => c.isFlow)
+  if (options.domain) chains = chains.filter(c => c.domain === options.domain)
+  if (options.flow) chains = chains.filter(c => c.entryId.includes(options.flow!))
+  return {
+    // 同一個 handler 只出一份封包，其餘觸發點列在封包內
+    groups: options.perTrigger ? new Map(chains.map(c => [c, [] as FlowChain[]])) : groupByHandler(chains),
+    crosscut: result.crosscut.filter(c => c.root != null),
+    chainsCovered: chains.length
+  }
+}
+
+/**
+ * 封包覆蓋表：`entryId` → 涵蓋它的那份封包所屬的 `entryId`。
+ *
+ * 不在表裡的流程**沒有任何封包**，narrate 對它無事可做。
+ *
+ * **`diff` 必須拿這一份來收斂重寫清單。** 兩邊各自判斷「哪些流程該寫敘述」的話，
+ * diff 會排出 pack 根本沒產出的章節：narrate 每輪回報「找不到封包」，條目退回佇列，
+ * 下一輪再排一次——永遠不會成功，也永遠不會消失。實測 mPHR 的 1981 條 entryId
+ * 裡有 1257 條對不上（1012 條非流程、245 條被併進代表），其中 15 條已經在待人工
+ * 佇列裡卡了近一週，看起來像欠帳，其實是這個錯配。
+ */
+export function packetCoverage(result: TraceResult, options: PackSelectOptions = {}): Map<string, string> {
+  const { groups, crosscut } = selectPackets(result, options)
+  const cover = new Map<string, string>()
+  for (const chain of crosscut) cover.set(chain.entryId, chain.entryId)
+  for (const [rep, siblings] of groups) {
+    cover.set(rep.entryId, rep.entryId)
+    for (const s of siblings) cover.set(s.entryId, rep.entryId)
+  }
+  return cover
+}
+
 /**
  * 把整份分析結果寫成封包目錄。`pack` 指令與閉環的 `loop` 共用這一份——
  * 兩邊各寫一次輸出邏輯的話，「先清舊檔」這類防孤兒規則遲早只剩一邊有。
  */
 export function writePackets(result: TraceResult, options: PackRunOptions): PackRunSummary {
-  let chains = result.chains.filter(c => c.root != null)
-  if (!options.all) chains = chains.filter(c => c.isFlow)
-  if (options.domain) chains = chains.filter(c => c.domain === options.domain)
-  if (options.flow) chains = chains.filter(c => c.entryId.includes(options.flow!))
+  const selection = selectPackets(result, options)
 
   fs.mkdirSync(options.outDir, { recursive: true })
   // 先清掉舊封包。不清的話流程消失或改名後會留下孤兒檔案，
@@ -465,9 +509,8 @@ export function writePackets(result: TraceResult, options: PackRunOptions): Pack
   const packOpts = { maxSourceChars: options.maxSourceChars ?? defaultPackOptions.maxSourceChars }
   let totalChars = 0
   let mergedTriggers = 0
-  // 同一個 handler 只出一份封包，其餘觸發點列在封包內
-  const groups = options.perTrigger ? new Map(chains.map(c => [c, [] as FlowChain[]])) : groupByHandler(chains)
-  for (const chain of result.crosscut) {
+  const { groups, crosscut } = selection
+  for (const chain of crosscut) {
     const md = packFlow(result.repoRoot, chain, packOpts)
     if (md) {
       fs.writeFileSync(path.join(options.outDir, packFileName(chain)), md, 'utf8')
@@ -492,12 +535,12 @@ export function writePackets(result: TraceResult, options: PackRunOptions): Pack
   for (const [name, md] of overviews) fs.writeFileSync(path.join(options.outDir, name), md, 'utf8')
 
   return {
-    packets: groups.size + result.crosscut.length,
+    packets: groups.size + crosscut.length,
     removedOld,
     totalChars,
     mergedTriggers,
-    chainsCovered: chains.length,
-    crosscut: result.crosscut.length,
+    chainsCovered: selection.chainsCovered,
+    crosscut: crosscut.length,
     overviews: overviews.size,
     limitationsFound: limitations !== undefined
   }

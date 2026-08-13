@@ -125,6 +125,58 @@ describe('diffFlows 不主動補寫', () => {
   })
 })
 
+/**
+ * diff 排出來的章節，pack 一定要產得出封包。
+ *
+ * 兩邊各自判斷「哪些流程要寫敘述」的話，narrate 會拿著不存在的封包路徑空轉：
+ * 每輪回報「找不到封包」、退回佇列、下輪再排一次，永遠不會成功也永遠不會消失。
+ * 實測時有 15 筆這種假欠帳在佇列裡卡了近一週。
+ */
+describe('diffFlows 只排 pack 產得出封包的章節', () => {
+  it('非流程（純查詢／關 modal）不進重寫清單——它本來就沒有封包', () => {
+    const existing = chain('a.vue#button.click@save', node('save', 10))
+    const cancel = chain('a.vue#UtilModal.cancel@modalInfo.cancelFn', node('cancelFn', 30), {
+      isFlow: false,
+      flowKind: 'none'
+    })
+    const d = diffFlows(result([existing]), result([existing, cancel]), manualsFor(existing.entryId))
+    expect(d.counts.added).toBe(1)
+    expect(d.work.rewrite).toEqual([])
+  })
+
+  it('同一個 handler 的多個觸發點摺疊成代表那一章，不各寫一份', () => {
+    const existing = chain('a.vue#other.click@load', node('load', 90))
+    // 三個觸發點打同一支 handler ＝ 同檔同行的 root，pack 只出代表那一份封包
+    const root = () => node('search', 166)
+    const button = chain('a.vue#UtilButton.click@search', root())
+    const datepicker = chain('a.vue#UtilDatepicker.change@search', root(), { trigger: 'change' })
+    const table = chain('a.vue#UtilTable.change-page@search', root(), { trigger: 'change-page' })
+    const d = diffFlows(
+      result([existing]),
+      result([existing, button, datepicker, table]),
+      manualsFor(existing.entryId)
+    )
+    expect(d.counts.added).toBe(3)
+    // 代表是 click（PRIMARY_TRIGGERS 之首），另外兩個由它的封包涵蓋
+    expect(d.work.rewrite).toEqual([button.entryId])
+  })
+
+  it('覆蓋表要帶出去，呼叫端才清得掉沒有封包的佇列條目', () => {
+    const flow = chain('a.vue#button.click@save', node('save', 10))
+    const notFlow = chain('a.vue#UtilModal.cancel@close', node('close', 30), { isFlow: false, flowKind: 'none' })
+    const d = diffFlows(result([flow, notFlow]), result([flow, notFlow]), manualsFor(flow.entryId))
+    expect(d.coverage.get(flow.entryId)).toBe(flow.entryId)
+    expect(d.coverage.has(notFlow.entryId)).toBe(false)
+  })
+
+  it('升版圈這種提早 return 的路徑也要帶覆蓋表——那時最需要把佇列清乾淨', () => {
+    const a = chain('a.vue#button.click@save', node('save', 10))
+    const d = diffFlows(result([a], 'aaa', 2), result([a], 'bbb', 3), manualsFor(a.entryId))
+    expect(d.verdict).toBe('upgrade')
+    expect(d.coverage.get(a.entryId)).toBe(a.entryId)
+  })
+})
+
 describe('diffFlows 檔案改名', () => {
   const renames = new Map([['src/views/Old/IndexView.vue', 'src/views/New/IndexView.vue']])
 
@@ -177,9 +229,10 @@ describe('diffFlows 護欄', () => {
   it('重寫章數超過門檻 → 熔斷', () => {
     const before: FlowChain[] = []
     const after: FlowChain[] = []
+    // 行號要各自不同：同檔同行 ＝ 同一個 handler，會被摺疊成一份封包／一章
     for (let i = 0; i < 5; i++) {
-      before.push(chain(`a.vue#button.click@fn${i}`, node(`fn${i}`, 10)))
-      after.push(chain(`a.vue#button.click@fn${i}`, node(`fn${i}`, 10), { sourceHash: 'moved' }))
+      before.push(chain(`a.vue#button.click@fn${i}`, node(`fn${i}`, 10 + i * 10)))
+      after.push(chain(`a.vue#button.click@fn${i}`, node(`fn${i}`, 10 + i * 10), { sourceHash: 'moved' }))
     }
     const d = diffFlows(result(before), result(after), manualsFor(...before.map(c => c.entryId)), {
       breakerThreshold: 3,

@@ -44,6 +44,12 @@ function diffResult(over: Partial<DiffResult> = {}): DiffResult {
     counts: { unchanged: 1, moved: 1, changed: 0, added: 0, removed: 0 },
     changes: [],
     work: { reanchor: ['a'], rewrite: [], archive: [] },
+    // 預設兩條流程都各自有封包（`trace()` 的預設 ID）。要測「沒有封包的條目會被
+    // 清掉」就在個別測試裡把它拿掉
+    coverage: new Map([
+      ['a', 'a'],
+      ['b', 'b']
+    ]),
     ...over
   }
 }
@@ -387,6 +393,66 @@ describe('runLoop 分流與佇列', () => {
     })
     const r = await runLoop(steps, defaults)
     expect(got).toEqual(['b'])
+    expect(r.pending).toEqual([])
+  })
+
+  it('佇列條目沒有對應封包 → 一併清掉，不是留著當永遠還不掉的假欠帳', async () => {
+    // 流程還在（trace 看得到），但它沒有封包：非流程，或被併進同 handler 的代表。
+    // narrate 對它只會回報「找不到封包」再退回佇列，下一輪原封不動重演
+    const pending: PendingEntry[] = [
+      { id: 'a', reason: 'narrate-skipped', detail: '', since: '2026-08-07' },
+      { id: '沒有封包的觸發點', reason: 'narrate-skipped', detail: '找不到封包', since: '2026-08-07' }
+    ]
+    let got: string[] = []
+    const logs: string[] = []
+    const { steps } = fakeSteps({
+      readPending: () => pending,
+      trace: async () => trace('bbb', ['a', '沒有封包的觸發點']),
+      diff: () => diffResult({ work: { reanchor: [], rewrite: [], archive: [] } }),
+      log: (line: string) => logs.push(line),
+      narrate: async (targets: string[]) => {
+        got = targets
+        return {
+          written: targets.map(entryId => ({ entryId, file: `${entryId}.md` })),
+          degraded: [],
+          skipped: [],
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }
+        }
+      }
+    })
+    const r = await runLoop(steps, defaults)
+    expect(got).toEqual(['a'])
+    expect(r.pending).toEqual([])
+    // 清掉要留下交代，否則佇列自己變短會被讀成「敘述補完了」
+    expect(logs.some(l => l.includes('佇列清掉 1 筆'))).toBe(true)
+  })
+
+  it('佇列的觸發點摺疊到代表，不繞過 diff 那層收斂', async () => {
+    const pending: PendingEntry[] = [{ id: 'b', reason: 'narrate-skipped', detail: '', since: '2026-08-07' }]
+    let got: string[] = []
+    const { steps } = fakeSteps({
+      readPending: () => pending,
+      diff: () =>
+        diffResult({
+          work: { reanchor: [], rewrite: ['a'], archive: [] },
+          // b 是 a 的同 handler 觸發點，敘述由 a 那一章涵蓋
+          coverage: new Map([
+            ['a', 'a'],
+            ['b', 'a']
+          ])
+        }),
+      narrate: async (targets: string[]) => {
+        got = targets
+        return {
+          written: targets.map(entryId => ({ entryId, file: `${entryId}.md` })),
+          degraded: [],
+          skipped: [],
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }
+        }
+      }
+    })
+    const r = await runLoop(steps, defaults)
+    expect(got).toEqual(['a'])
     expect(r.pending).toEqual([])
   })
 
